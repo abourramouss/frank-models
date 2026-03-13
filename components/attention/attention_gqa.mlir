@@ -36,6 +36,8 @@ module @attention_components {
     %n_head = tensor.dim %query, %c2 : tensor<?x?x?x?xf32>
     %head_dim = tensor.dim %query, %c3 : tensor<?x?x?x?xf32>
     %n_head_kv = tensor.dim %key, %c2 : tensor<?x?x?x?xf32>
+    // K/V may have a different sequence length than Q (decode: seq_q=1, seq_kv=ctx+1).
+    %seq_len_kv = tensor.dim %key, %c1 : tensor<?x?x?x?xf32>
 
     // Transpose Q/K/V from [batch, seq, n_head, head_dim] to [batch, n_head, seq, head_dim]
     %q_transposed_init = tensor.empty(%batch, %n_head, %seq_len, %head_dim) : tensor<?x?x?x?xf32>
@@ -50,7 +52,7 @@ module @attention_components {
       linalg.yield %in : f32
     } -> tensor<?x?x?x?xf32>
 
-    %k_transposed_init = tensor.empty(%batch, %n_head_kv, %seq_len, %head_dim) : tensor<?x?x?x?xf32>
+    %k_transposed_init = tensor.empty(%batch, %n_head_kv, %seq_len_kv, %head_dim) : tensor<?x?x?x?xf32>
     %k_transposed = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1, d2, d3) -> (d0, d2, d1, d3)>,
@@ -62,7 +64,7 @@ module @attention_components {
       linalg.yield %in : f32
     } -> tensor<?x?x?x?xf32>
 
-    %v_transposed_init = tensor.empty(%batch, %n_head_kv, %seq_len, %head_dim) : tensor<?x?x?x?xf32>
+    %v_transposed_init = tensor.empty(%batch, %n_head_kv, %seq_len_kv, %head_dim) : tensor<?x?x?x?xf32>
     %v_transposed = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1, d2, d3) -> (d0, d2, d1, d3)>,
@@ -81,7 +83,7 @@ module @attention_components {
     %repeat_factor = arith.divui %n_head, %n_head_kv : index
 
     // Allocate 5D output for K broadcast: [batch, n_head_kv, repeat_factor, seq, head_dim].
-    %k_broadcast_init = tensor.empty(%batch, %n_head_kv, %repeat_factor, %seq_len, %head_dim) : tensor<?x?x?x?x?xf32>
+    %k_broadcast_init = tensor.empty(%batch, %n_head_kv, %repeat_factor, %seq_len_kv, %head_dim) : tensor<?x?x?x?x?xf32>
 
     // Broadcast K along repeat_factor dimension via linalg.generic.
     // Input map omits d2 (repeat_factor), causing each K[batch, kv_head, seq, head_dim]
@@ -103,7 +105,7 @@ module @attention_components {
         : tensor<?x?x?x?x?xf32> into tensor<?x?x?x?xf32>
 
     // Repeat V using the same broadcast+collapse pattern.
-    %v_broadcast_init = tensor.empty(%batch, %n_head_kv, %repeat_factor, %seq_len, %head_dim) : tensor<?x?x?x?x?xf32>
+    %v_broadcast_init = tensor.empty(%batch, %n_head_kv, %repeat_factor, %seq_len_kv, %head_dim) : tensor<?x?x?x?x?xf32>
     %v_broadcast = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d3, d4)>,
@@ -142,22 +144,27 @@ module @attention_components {
       iree_linalg_ext.yield %arg0 : f32
     } -> tensor<?x?x?xf32>
 
-    // Expand back to [batch, n_head, seq, head_dim]
-    %output_4d = tensor.expand_shape %output_3d [[0, 1], [2], [3]]
-        output_shape [%batch, %n_head, %seq_len, %head_dim]
-        : tensor<?x?x?xf32> into tensor<?x?x?x?xf32>
-
-    // Transpose back from [batch, n_head, seq, head_dim] to [batch, seq, n_head, head_dim]
+    // Reshape [batch*n_head, seq, head_dim] → [batch, seq, n_head, head_dim].
+    // Combines un-collapsing batch*n_head and the n_head↔seq transpose into one generic.
+    // Uses linalg.index + tensor.extract instead of tensor.expand_shape to avoid an IREE
+    // GlobalOpt bug: expanding dynamic dim 0 (batch*n_head) into [batch, n_head=static]
+    // produces static_output_shape = array<i64> (empty) → verifier crash.
     %output_init = tensor.empty(%batch, %seq_len, %n_head, %head_dim) : tensor<?x?x?x?xf32>
     %output = linalg.generic {
-      indexing_maps = [
-        affine_map<(d0, d1, d2, d3) -> (d0, d2, d1, d3)>,
-        affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
-      ],
+      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
       iterator_types = ["parallel", "parallel", "parallel", "parallel"]
-    } ins(%output_4d : tensor<?x?x?x?xf32>) outs(%output_init : tensor<?x?x?x?xf32>) {
-    ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
+    } outs(%output_init : tensor<?x?x?x?xf32>) {
+    ^bb0(%out: f32):
+      %i0 = linalg.index 0 : index  // batch
+      %i1 = linalg.index 1 : index  // seq
+      %i2 = linalg.index 2 : index  // n_head
+      %i3 = linalg.index 3 : index  // head_dim
+      // Flat batch-head index: i0 * n_head + i2
+      %flat_head = arith.muli %i0, %n_head : index
+      %flat_idx = arith.addi %flat_head, %i2 : index
+      // output_3d is [batch*n_head, seq, head_dim]
+      %val = tensor.extract %output_3d[%flat_idx, %i1, %i3] : tensor<?x?x?xf32>
+      linalg.yield %val : f32
     } -> tensor<?x?x?x?xf32>
 
     util.return %output : tensor<?x?x?x?xf32>

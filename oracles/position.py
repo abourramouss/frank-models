@@ -11,9 +11,12 @@ def rope(
 ) -> np.ndarray:
     """Rotary Position Embeddings (RoPE).
 
-    Applies rotation to adjacent dimension pairs based on position.
-    The rotation angle for dimension pair i at position p is:
-        theta = p * freq_scale / freq_base^(2i/head_dim)
+    Uses the "rotate_half" convention (HuggingFace / LLaMA style):
+    dimension i pairs with dimension i + head_dim/2.
+
+    For position p and frequency freq[i]:
+        out[..., i]             = input[..., i] * cos - input[..., i+half] * sin
+        out[..., i + half_dim]  = input[..., i+half] * cos + input[..., i] * sin
 
     Args:
         input: Input tensor [batch, seq_len, n_head, head_dim]
@@ -31,25 +34,21 @@ def rope(
     dim_indices = np.arange(half_dim)
     freqs = freq_scale / np.power(freq_base, 2 * dim_indices / head_dim)
 
-    # Reshape input to [batch, seq_len, n_head, half_dim, 2]
-    x = input.reshape(batch, seq_len, n_head, half_dim, 2)
-    x0 = x[..., 0]  # [batch, seq_len, n_head, half_dim]
-    x1 = x[..., 1]
+    # Split into two halves (rotate_half convention)
+    x_first = input[..., :half_dim]   # [batch, seq_len, n_head, half_dim]
+    x_second = input[..., half_dim:]  # [batch, seq_len, n_head, half_dim]
 
     # Compute angles: positions[:, :, None, None] * freqs[None, None, None, :]
-    # positions: [batch, seq_len] -> [batch, seq_len, 1, 1]
-    # freqs: [half_dim] -> [1, 1, 1, half_dim]
     angles = positions[:, :, None, None] * freqs[None, None, None, :]
 
     cos_vals = np.cos(angles)
     sin_vals = np.sin(angles)
 
-    # Apply rotation:
-    # x0' = x0*cos - x1*sin
-    # x1' = x0*sin + x1*cos
-    x0_rot = x0 * cos_vals - x1 * sin_vals
-    x1_rot = x0 * sin_vals + x1 * cos_vals
+    # Apply rotation (rotate_half style):
+    # first_half'  = first_half * cos - second_half * sin
+    # second_half' = second_half * cos + first_half * sin
+    first_rot = x_first * cos_vals - x_second * sin_vals
+    second_rot = x_second * cos_vals + x_first * sin_vals
 
-    # Stack and reshape back to [batch, seq_len, n_head, head_dim]
-    output = np.stack([x0_rot, x1_rot], axis=-1)
-    return output.reshape(batch, seq_len, n_head, head_dim)
+    # Concatenate halves back to [batch, seq_len, n_head, head_dim]
+    return np.concatenate([first_rot, second_rot], axis=-1)

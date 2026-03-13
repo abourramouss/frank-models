@@ -39,6 +39,7 @@ module @llm_inference {
   // Architecture variant flags
   util.func private @hparams.use_attention_bias() -> i1
   util.func private @hparams.normalize_expert_weights() -> i1
+  util.func private @hparams.use_qk_norm() -> i1
 
   // ===== Model-level parameter imports (model_params module provides these) =====
   util.func private @model_params.token_embd_weight() -> tensor<?x?xf32>
@@ -89,7 +90,8 @@ module @llm_inference {
       f32,                 // rope_freq_base
       f32,                 // rope_freq_scale
       i1,                  // use_bias
-      i1                   // normalize_weights
+      i1,                  // normalize_weights
+      i1                   // use_qk_norm
   ) -> (tensor<?x?x?xf32>,     // output: [batch, seq_len, n_embd]
         !util.list<?>)         // cache_out with K/V written
 
@@ -101,8 +103,6 @@ module @llm_inference {
       tensor<?x?x?xi32>,       // block_tables: [n_layers, batch, max_blocks]
       tensor<?x?xi32>,         // context_lens: [n_layers, batch]
       index,                   // max_context_len
-      tensor<?xi32>,           // block_indices: [batch]
-      tensor<?xi32>,           // pos_in_blocks: [batch]
       i32,                     // layer_idx
       index,                   // n_head
       index,                   // n_head_kv
@@ -114,7 +114,8 @@ module @llm_inference {
       f32,                     // rope_freq_base
       f32,                     // rope_freq_scale
       i1,                      // use_bias
-      i1                       // normalize_weights
+      i1,                      // normalize_weights
+      i1                       // use_qk_norm
   ) -> (tensor<?x?xf32>,       // output: [batch, n_embd]
         !util.list<?>)         // cache_out
 
@@ -168,6 +169,7 @@ module @llm_inference {
     %rms_eps = util.call @hparams.layer_norm_rms_epsilon() : () -> f32
     %use_bias = util.call @hparams.use_attention_bias() : () -> i1
     %normalize_weights = util.call @hparams.normalize_expert_weights() : () -> i1
+    %use_qk_norm = util.call @hparams.use_qk_norm() : () -> i1
 
     // Convert to index.
     %n_vocab = arith.index_cast %n_vocab_i64 : i64 to index
@@ -200,12 +202,12 @@ module @llm_inference {
           %n_head, %n_head_kv, %n_embd, %n_ff,
           %n_expert, %n_expert_used,
           %rms_eps, %rope_freq_base, %rope_freq_scale,
-          %use_bias, %normalize_weights)
+          %use_bias, %normalize_weights, %use_qk_norm)
           : (tensor<?x?x?xf32>, tensor<?x?xi64>, !util.list<?>,
              tensor<?x?x?xi32>, tensor<?xi32>, index,
              i32,
              index, index, index, index, index, index,
-             f32, f32, f32, i1, i1)
+             f32, f32, f32, i1, i1, i1)
           -> (tensor<?x?x?xf32>, !util.list<?>)
 
       scf.yield %layer_out, %cache_updated : tensor<?x?x?xf32>, !util.list<?>
@@ -246,9 +248,7 @@ module @llm_inference {
       %cache: !util.list<?>,
       %block_tables: tensor<?x?x?xi32>,     // [n_layers, batch, max_blocks]
       %context_lens: tensor<?x?xi32>,       // [n_layers, batch]
-      %max_context_len: index,
-      %block_indices: tensor<?xi32>,        // [batch]
-      %pos_in_blocks: tensor<?xi32>         // [batch]
+      %max_context_len: index
   ) -> (tensor<?x?xf32>,                    // logits: [batch, vocab_size]
         !util.list<?>) {                    // cache_out
     %c0 = arith.constant 0 : index
@@ -265,8 +265,9 @@ module @llm_inference {
     %n_expert_used_i64 = util.call @hparams.expert_used_count() : () -> i64
     %rope_freq_base = util.call @hparams.rope_freq_base() : () -> f32
     %rms_eps = util.call @hparams.layer_norm_rms_epsilon() : () -> f32
-    %use_bias = util.call @hparams.use_attention_bias() : () -> i1
-    %normalize_weights = util.call @hparams.normalize_expert_weights() : () -> i1
+    %use_bias_d = util.call @hparams.use_attention_bias() : () -> i1
+    %normalize_weights_d = util.call @hparams.normalize_expert_weights() : () -> i1
+    %use_qk_norm_d = util.call @hparams.use_qk_norm() : () -> i1
 
     // Convert to index.
     %n_vocab = arith.index_cast %n_vocab_i64 : i64 to index
@@ -294,18 +295,16 @@ module @llm_inference {
       %layer_out, %cache_updated = util.call @transformer_layer_moe_decode_components.transformer_layer_moe_decode(
           %hidden, %positions, %cache_iter,
           %block_tables, %context_lens, %max_context_len,
-          %block_indices, %pos_in_blocks,
           %layer_idx_i32,
           %n_head, %n_head_kv, %n_embd, %n_ff,
           %n_expert, %n_expert_used,
           %rms_eps, %rope_freq_base, %rope_freq_scale,
-          %use_bias, %normalize_weights)
+          %use_bias_d, %normalize_weights_d, %use_qk_norm_d)
           : (tensor<?x?xf32>, tensor<?xi64>, !util.list<?>,
              tensor<?x?x?xi32>, tensor<?x?xi32>, index,
-             tensor<?xi32>, tensor<?xi32>,
              i32,
              index, index, index, index, index, index,
-             f32, f32, f32, i1, i1)
+             f32, f32, f32, i1, i1, i1)
           -> (tensor<?x?xf32>, !util.list<?>)
 
       scf.yield %layer_out, %cache_updated : tensor<?x?xf32>, !util.list<?>

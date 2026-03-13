@@ -25,6 +25,12 @@
 module @attention_block_decode_components {
 
   // External dependencies resolved by iree-link.
+  util.func private @rms_norm_components.rms_norm_linalg(
+      tensor<?x?xf32>,    // [n_tokens, hidden_dim]
+      tensor<?xf32>,       // [hidden_dim]
+      f32                  // epsilon
+  ) -> tensor<?x?xf32>
+
   util.func private @position_components.rope(
       tensor<?x?x?x?xf32>,   // [batch, seq_len, n_head, head_dim]
       tensor<?x?xi64>,        // [batch, seq_len]
@@ -57,7 +63,11 @@ module @attention_block_decode_components {
       %n_head_kv: index,
       %n_embd: index,
       %rope_freq_base: f32,
-      %rope_freq_scale: f32
+      %rope_freq_scale: f32,
+      %use_qk_norm: i1,                      // flag to enable/disable QK norm
+      %q_norm_weight: tensor<?xf32>,         // [n_embd] - may be dummy if not used
+      %k_norm_weight: tensor<?xf32>,         // [n_embd_kv] - may be dummy if not used
+      %rms_eps: f32                          // epsilon for QK norm
   ) -> (tensor<?x?xf32>,                     // output: [batch, n_embd]
         tensor<?x?x?xf32>,                   // k_new: [batch, n_head_kv, head_dim]
         tensor<?x?x?xf32>) {                 // v_new: [batch, n_head_kv, head_dim]
@@ -81,12 +91,33 @@ module @attention_block_decode_components {
     %seq_len_1 = arith.constant 1 : index
 
     // Expand input from [batch, n_embd] to [batch, 1, n_embd] for matmul.
-    %input_3d = tensor.expand_shape %input [[0], [1, 2]] output_shape [%batch, %seq_len_1, %n_embd]
-        : tensor<?x?xf32> into tensor<?x?x?xf32>
+    // Use linalg.generic broadcast (d1 absent from input map) to avoid tensor.expand_shape
+    // splitting the static n_embd dim — see IREE GlobalOpt bug note in attention_block_prefill.
+    %input_3d_init = tensor.empty(%batch, %seq_len_1, %n_embd) : tensor<?x?x?xf32>
+    %input_3d = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1, d2) -> (d0, d2)>,
+        affine_map<(d0, d1, d2) -> (d0, d1, d2)>
+      ],
+      iterator_types = ["parallel", "parallel", "parallel"]
+    } ins(%input : tensor<?x?xf32>) outs(%input_3d_init : tensor<?x?x?xf32>) {
+    ^bb0(%in: f32, %out: f32):
+      linalg.yield %in : f32
+    } -> tensor<?x?x?xf32>
 
     // Expand positions from [batch] to [batch, 1] for RoPE.
-    %positions_2d = tensor.expand_shape %positions [[0, 1]] output_shape [%batch, %seq_len_1]
-        : tensor<?xi64> into tensor<?x?xi64>
+    // Use linalg.generic broadcast to avoid any expand_shape static-dim issues.
+    %positions_2d_init = tensor.empty(%batch, %seq_len_1) : tensor<?x?xi64>
+    %positions_2d = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1) -> (d0)>,
+        affine_map<(d0, d1) -> (d0, d1)>
+      ],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%positions : tensor<?xi64>) outs(%positions_2d_init : tensor<?x?xi64>) {
+    ^bb0(%in: i64, %out: i64):
+      linalg.yield %in : i64
+    } -> tensor<?x?xi64>
 
     // QKV projections: [batch, 1, n_embd] @ [n_embd, n_out] -> [batch, 1, n_out]
     %cst_zero = arith.constant 0.0 : f32
@@ -165,19 +196,99 @@ module @attention_block_decode_components {
       scf.yield %v_proj : tensor<?x?xf32>
     }
 
+    // Conditionally apply QK norm (RMS norm on flat Q/K projections before reshape).
+    // Applied to [batch, n_embd] (Q) or [batch, n_embd_kv] (K).
+    %q_normed = scf.if %use_qk_norm -> (tensor<?x?xf32>) {
+      %q_normed_2d = util.call @rms_norm_components.rms_norm_linalg(
+          %q_final, %q_norm_weight, %rms_eps)
+          : (tensor<?x?xf32>, tensor<?xf32>, f32) -> tensor<?x?xf32>
+      scf.yield %q_normed_2d : tensor<?x?xf32>
+    } else {
+      scf.yield %q_final : tensor<?x?xf32>
+    }
+
+    %k_normed = scf.if %use_qk_norm -> (tensor<?x?xf32>) {
+      %k_normed_2d = util.call @rms_norm_components.rms_norm_linalg(
+          %k_final, %k_norm_weight, %rms_eps)
+          : (tensor<?x?xf32>, tensor<?xf32>, f32) -> tensor<?x?xf32>
+      scf.yield %k_normed_2d : tensor<?x?xf32>
+    } else {
+      scf.yield %k_final : tensor<?x?xf32>
+    }
+
     // Reshape for multi-head: [batch, n_embd] -> [batch, n_head, head_dim]
-    %q_reshaped_3d = tensor.expand_shape %q_final [[0], [1, 2]] output_shape [%batch, %n_head, %head_dim]
-        : tensor<?x?xf32> into tensor<?x?x?xf32>
-    %k_reshaped_3d = tensor.expand_shape %k_final [[0], [1, 2]] output_shape [%batch, %n_head_kv, %head_dim_kv]
-        : tensor<?x?xf32> into tensor<?x?x?xf32>
-    %v_reshaped_3d = tensor.expand_shape %v_final [[0], [1, 2]] output_shape [%batch, %n_head_kv, %head_dim_kv]
-        : tensor<?x?xf32> into tensor<?x?x?xf32>
+    // Use linalg.generic + linalg.index to avoid IREE expand_shape bug when n_head/head_dim
+    // are constant-folded to static values by GlobalOpt.
+    %q_reshaped_3d_init = tensor.empty(%batch, %n_head, %head_dim) : tensor<?x?x?xf32>
+    %q_reshaped_3d = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>],
+      iterator_types = ["parallel", "parallel", "parallel"]
+    } outs(%q_reshaped_3d_init : tensor<?x?x?xf32>) {
+    ^bb0(%out: f32):
+      %i0 = linalg.index 0 : index
+      %i1 = linalg.index 1 : index
+      %i2 = linalg.index 2 : index
+      %flat = arith.muli %i1, %head_dim : index
+      %flat_idx = arith.addi %flat, %i2 : index
+      %val = tensor.extract %q_normed[%i0, %flat_idx] : tensor<?x?xf32>
+      linalg.yield %val : f32
+    } -> tensor<?x?x?xf32>
+
+    %k_reshaped_3d_init = tensor.empty(%batch, %n_head_kv, %head_dim_kv) : tensor<?x?x?xf32>
+    %k_reshaped_3d = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>],
+      iterator_types = ["parallel", "parallel", "parallel"]
+    } outs(%k_reshaped_3d_init : tensor<?x?x?xf32>) {
+    ^bb0(%out: f32):
+      %i0 = linalg.index 0 : index
+      %i1 = linalg.index 1 : index
+      %i2 = linalg.index 2 : index
+      %flat = arith.muli %i1, %head_dim_kv : index
+      %flat_idx = arith.addi %flat, %i2 : index
+      %val = tensor.extract %k_normed[%i0, %flat_idx] : tensor<?x?xf32>
+      linalg.yield %val : f32
+    } -> tensor<?x?x?xf32>
+
+    %v_reshaped_3d_init = tensor.empty(%batch, %n_head_kv, %head_dim_kv) : tensor<?x?x?xf32>
+    %v_reshaped_3d = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d1, d2)>],
+      iterator_types = ["parallel", "parallel", "parallel"]
+    } outs(%v_reshaped_3d_init : tensor<?x?x?xf32>) {
+    ^bb0(%out: f32):
+      %i0 = linalg.index 0 : index
+      %i1 = linalg.index 1 : index
+      %i2 = linalg.index 2 : index
+      %flat = arith.muli %i1, %head_dim_kv : index
+      %flat_idx = arith.addi %flat, %i2 : index
+      %val = tensor.extract %v_final[%i0, %flat_idx] : tensor<?x?xf32>
+      linalg.yield %val : f32
+    } -> tensor<?x?x?xf32>
 
     // Add seq_len=1 dimension for RoPE: [batch, n_head, head_dim] -> [batch, 1, n_head, head_dim]
-    %q_reshaped_4d = tensor.expand_shape %q_reshaped_3d [[0], [1, 2], [3]] output_shape [%batch, %seq_len_1, %n_head, %head_dim]
-        : tensor<?x?x?xf32> into tensor<?x?x?x?xf32>
-    %k_reshaped_4d = tensor.expand_shape %k_reshaped_3d [[0], [1, 2], [3]] output_shape [%batch, %seq_len_1, %n_head_kv, %head_dim_kv]
-        : tensor<?x?x?xf32> into tensor<?x?x?x?xf32>
+    // Use linalg.generic broadcast (d1 absent from input map) to avoid static-dim split bug.
+    %q_reshaped_4d_init = tensor.empty(%batch, %seq_len_1, %n_head, %head_dim) : tensor<?x?x?x?xf32>
+    %q_reshaped_4d = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>,
+        affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
+      ],
+      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
+    } ins(%q_reshaped_3d : tensor<?x?x?xf32>) outs(%q_reshaped_4d_init : tensor<?x?x?x?xf32>) {
+    ^bb0(%in: f32, %out: f32):
+      linalg.yield %in : f32
+    } -> tensor<?x?x?x?xf32>
+
+    %k_reshaped_4d_init = tensor.empty(%batch, %seq_len_1, %n_head_kv, %head_dim_kv) : tensor<?x?x?x?xf32>
+    %k_reshaped_4d = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>,
+        affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
+      ],
+      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
+    } ins(%k_reshaped_3d : tensor<?x?x?xf32>) outs(%k_reshaped_4d_init : tensor<?x?x?x?xf32>) {
+    ^bb0(%in: f32, %out: f32):
+      linalg.yield %in : f32
+    } -> tensor<?x?x?x?xf32>
 
     // Apply RoPE to query and key (new token only).
     %q_rope_4d = util.call @position_components.rope(%q_reshaped_4d, %positions_2d, %rope_freq_base, %rope_freq_scale)
@@ -193,8 +304,18 @@ module @attention_block_decode_components {
 
     // V_full: [batch, ctx_len+1, n_head_kv, head_dim]
     // Note: v_reshaped_3d is [batch, n_head_kv, head_dim], need to expand to [batch, 1, n_head_kv, head_dim]
-    %v_reshaped_4d = tensor.expand_shape %v_reshaped_3d [[0], [1, 2], [3]] output_shape [%batch, %seq_len_1, %n_head_kv, %head_dim_kv]
-        : tensor<?x?x?xf32> into tensor<?x?x?x?xf32>
+    // Use linalg.generic broadcast to avoid the IREE expand_shape static-dim-split bug.
+    %v_reshaped_4d_init = tensor.empty(%batch, %seq_len_1, %n_head_kv, %head_dim_kv) : tensor<?x?x?x?xf32>
+    %v_reshaped_4d = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>,
+        affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
+      ],
+      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
+    } ins(%v_reshaped_3d : tensor<?x?x?xf32>) outs(%v_reshaped_4d_init : tensor<?x?x?x?xf32>) {
+    ^bb0(%in: f32, %out: f32):
+      linalg.yield %in : f32
+    } -> tensor<?x?x?x?xf32>
     %v_full = tensor.concat dim(1) %v_cached, %v_reshaped_4d
         : (tensor<?x?x?x?xf32>, tensor<?x?x?x?xf32>) -> tensor<?x?x?x?xf32>
 

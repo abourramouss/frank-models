@@ -79,4 +79,9 @@ module @hparams {
     util.return %v : i1
   }
 
+  util.func public @use_qk_norm() -> i1 {
+    %v = arith.constant false
+    util.return %v : i1
+  }
+
 }

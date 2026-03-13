@@ -2,11 +2,10 @@
 
 Tests both MHA (n_head == n_head_kv) and GQA (n_head > n_head_kv).
 
-Fully dynamic shapes crash the compiler (iree-org/iree#23277).
 Three test tiers use iree-link wrappers with increasing dynamism:
   1. Fully static - all dims concrete
   2. Dynamic batch/seq - n_head/head_dim static, seq_len divisible by 32
-  3. Fully dynamic - all dims dynamic (xfailed, iree#23277)
+  3. Fully dynamic - all dims dynamic (fixed in iree-org/iree#23304)
 """
 
 import numpy as np
@@ -394,18 +393,17 @@ def test_dynamic_batch_seq_different_head_config(dynamic_attention_4x32):
 
 
 # ---------------------------------------------------------------------------
-# Fully dynamic tests (xfailed - iree-org/iree#23277)
+# Fully dynamic tests (fixed in iree-org/iree#23304, re-landed as #23544)
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def attention_module(iree_cfg):
-    pytest.xfail("iree-org/iree#23277: dynamic shapes + attention op")
     return compile_component("attention/attention_gqa.mlir", iree_cfg)
 
 
 def test_mha_dynamic_basic(attention_module):
-    """Test MHA with fully dynamic shapes (xfailed)."""
+    """Test MHA with fully dynamic shapes."""
     np.random.seed(42)
     batch, seq_len, n_head, head_dim = 2, 4, 8, 16
 
@@ -421,7 +419,7 @@ def test_mha_dynamic_basic(attention_module):
 
 
 def test_mha_dynamic_small(attention_module):
-    """Test MHA with small dimensions, fully dynamic (xfailed)."""
+    """Test MHA with small dimensions, fully dynamic."""
     np.random.seed(123)
     batch, seq_len, n_head, head_dim = 1, 3, 4, 8
 
@@ -437,7 +435,7 @@ def test_mha_dynamic_small(attention_module):
 
 
 def test_various_scales_dynamic(attention_module):
-    """Test with different scale values, fully dynamic (xfailed)."""
+    """Test with different scale values, fully dynamic."""
     np.random.seed(789)
     batch, seq_len, n_head, head_dim = 2, 4, 4, 32
 
@@ -449,4 +447,6 @@ def test_various_scales_dynamic(attention_module):
         scale = np.float32(scale_val)
         iree_result = attention_module.attention_gqa(query, key, value, scale)
         oracle_result = attention_oracle(query, key, value, scale)
-        assert_close(iree_result, oracle_result, rtol=1e-4, atol=1e-5)
+        # Flash attention tiles K1 differently than naive attention; larger scales
+        # sharpen softmax and amplify accumulation differences in f32.
+        assert_close(iree_result, oracle_result, rtol=1e-3, atol=1e-3)

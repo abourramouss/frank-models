@@ -49,6 +49,10 @@ module @transformer_layer_moe_prefill_components {
   util.func private @model_params.attn_v_bias(i32) -> tensor<?xf32>
   util.func private @model_params.attn_output_bias(i32) -> tensor<?xf32>
 
+  // QK norm weights (may be dummy if use_qk_norm=false)
+  util.func private @model_params.attn_q_norm_weight(i32) -> tensor<?xf32>
+  util.func private @model_params.attn_k_norm_weight(i32) -> tensor<?xf32>
+
   // MoE weights
   util.func private @model_params.ffn_gate_inp_weight(i32) -> tensor<?x?xf32>
   util.func private @model_params.ffn_up_exps_weight(i32) -> tensor<?x?x?xf32>
@@ -80,7 +84,11 @@ module @transformer_layer_moe_prefill_components {
       index,               // n_head_kv
       index,               // n_embd
       f32,                 // rope_freq_base
-      f32                  // rope_freq_scale
+      f32,                 // rope_freq_scale
+      i1,                  // use_qk_norm
+      tensor<?xf32>,       // q_norm_weight [head_dim]
+      tensor<?xf32>,       // k_norm_weight [head_dim]
+      f32                  // rms_eps (for QK norm)
   ) -> (tensor<?x?x?xf32>,     // output: [batch, seq_len, n_embd]
         tensor<?x?x?x?xf32>,   // k_out: [batch, seq_len, n_head_kv, head_dim]
         tensor<?x?x?x?xf32>)   // v_out: [batch, seq_len, n_head_kv, head_dim]
@@ -129,7 +137,8 @@ module @transformer_layer_moe_prefill_components {
       %rope_freq_base: f32,
       %rope_freq_scale: f32,
       %use_bias: i1,
-      %normalize_weights: i1
+      %normalize_weights: i1,
+      %use_qk_norm: i1
   ) -> (tensor<?x?x?xf32>,               // output: [batch, seq_len, n_embd]
         !util.list<?>) {                 // cache_out with K/V written
     %c0 = arith.constant 0 : index
@@ -152,6 +161,9 @@ module @transformer_layer_moe_prefill_components {
     %bk = util.call @model_params.attn_k_bias(%layer_idx) : (i32) -> tensor<?xf32>
     %bv = util.call @model_params.attn_v_bias(%layer_idx) : (i32) -> tensor<?xf32>
     %bo = util.call @model_params.attn_output_bias(%layer_idx) : (i32) -> tensor<?xf32>
+
+    %q_norm_w = util.call @model_params.attn_q_norm_weight(%layer_idx) : (i32) -> tensor<?xf32>
+    %k_norm_w = util.call @model_params.attn_k_norm_weight(%layer_idx) : (i32) -> tensor<?xf32>
 
     %gate_inp_w = util.call @model_params.ffn_gate_inp_weight(%layer_idx) : (i32) -> tensor<?x?xf32>
     %up_exps_w = util.call @model_params.ffn_up_exps_weight(%layer_idx) : (i32) -> tensor<?x?x?xf32>
@@ -179,11 +191,13 @@ module @transformer_layer_moe_prefill_components {
         %wq, %wk, %wv, %wo,
         %bq, %bk, %bv, %bo,
         %use_bias, %n_head, %n_head_kv, %n_embd,
-        %rope_freq_base, %rope_freq_scale)
+        %rope_freq_base, %rope_freq_scale,
+        %use_qk_norm, %q_norm_w, %k_norm_w, %rms_eps)
         : (tensor<?x?x?xf32>, tensor<?x?xi64>,
            tensor<?x?xf32>, tensor<?x?xf32>, tensor<?x?xf32>, tensor<?x?xf32>,
            tensor<?xf32>, tensor<?xf32>, tensor<?xf32>, tensor<?xf32>,
-           i1, index, index, index, f32, f32)
+           i1, index, index, index, f32, f32,
+           i1, tensor<?xf32>, tensor<?xf32>, f32)
         -> (tensor<?x?x?xf32>, tensor<?x?x?x?xf32>, tensor<?x?x?x?xf32>)
 
     // Residual connection: input + attn_out.

@@ -22,8 +22,6 @@
 //   block_tables:    [n_layers, batch, max_blocks] - Block indirection
 //   context_lens:    [n_layers, batch]             - Current context length per layer/seq
 //   max_context_len: index                         - Max context for gather output shape
-//   block_indices:   [batch]                       - Which block to write new K/V
-//   pos_in_blocks:   [batch]                       - Position within block for new K/V
 //
 // Returns:
 //   output:          [batch, n_embd]               - Output hidden state
@@ -50,6 +48,10 @@ module @transformer_layer_moe_decode_components {
   util.func private @model_params.attn_k_bias(i32) -> tensor<?xf32>
   util.func private @model_params.attn_v_bias(i32) -> tensor<?xf32>
   util.func private @model_params.attn_output_bias(i32) -> tensor<?xf32>
+
+  // QK norm weights (may be dummy if use_qk_norm=false)
+  util.func private @model_params.attn_q_norm_weight(i32) -> tensor<?xf32>
+  util.func private @model_params.attn_k_norm_weight(i32) -> tensor<?xf32>
 
   // MoE weights
   util.func private @model_params.ffn_gate_inp_weight(i32) -> tensor<?x?xf32>
@@ -81,8 +83,8 @@ module @transformer_layer_moe_decode_components {
       index,                   // layer
       tensor<?x?x?xf32>,       // new_k: [batch, n_head_kv, head_dim]
       tensor<?x?x?xf32>,       // new_v: [batch, n_head_kv, head_dim]
-      tensor<?xi32>,           // block_indices: [batch]
-      tensor<?xi32>            // pos_in_blocks: [batch]
+      tensor<?x?x?xi32>,       // block_tables: [n_layers, batch, max_blocks]
+      tensor<?xi64>            // positions: [batch]
   ) -> !util.list<?>
 
   // Decode attention: process single token with cached K/V
@@ -104,7 +106,11 @@ module @transformer_layer_moe_decode_components {
       index,                   // n_head_kv
       index,                   // n_embd
       f32,                     // rope_freq_base
-      f32                      // rope_freq_scale
+      f32,                     // rope_freq_scale
+      i1,                      // use_qk_norm
+      tensor<?xf32>,           // q_norm_weight [head_dim]
+      tensor<?xf32>,           // k_norm_weight [head_dim]
+      f32                      // rms_eps (for QK norm)
   ) -> (tensor<?x?xf32>,       // output: [batch, n_embd]
         tensor<?x?x?xf32>,     // k_new: [batch, n_head_kv, head_dim]
         tensor<?x?x?xf32>)     // v_new: [batch, n_head_kv, head_dim]
@@ -131,8 +137,6 @@ module @transformer_layer_moe_decode_components {
       %block_tables: tensor<?x?x?xi32>,     // [n_layers, batch, max_blocks]
       %context_lens: tensor<?x?xi32>,       // [n_layers, batch]
       %max_context_len: index,
-      %block_indices: tensor<?xi32>,        // [batch] - which block for new K/V
-      %pos_in_blocks: tensor<?xi32>,        // [batch] - position within block
       %layer_idx: i32,
       %n_head: index,
       %n_head_kv: index,
@@ -144,7 +148,8 @@ module @transformer_layer_moe_decode_components {
       %rope_freq_base: f32,
       %rope_freq_scale: f32,
       %use_bias: i1,
-      %normalize_weights: i1
+      %normalize_weights: i1,
+      %use_qk_norm: i1
   ) -> (tensor<?x?xf32>,                    // output: [batch, n_embd]
         !util.list<?>) {                    // cache_out with new K/V written
     %c0 = arith.constant 0 : index
@@ -167,6 +172,9 @@ module @transformer_layer_moe_decode_components {
     %bk = util.call @model_params.attn_k_bias(%layer_idx) : (i32) -> tensor<?xf32>
     %bv = util.call @model_params.attn_v_bias(%layer_idx) : (i32) -> tensor<?xf32>
     %bo = util.call @model_params.attn_output_bias(%layer_idx) : (i32) -> tensor<?xf32>
+
+    %q_norm_w = util.call @model_params.attn_q_norm_weight(%layer_idx) : (i32) -> tensor<?xf32>
+    %k_norm_w = util.call @model_params.attn_k_norm_weight(%layer_idx) : (i32) -> tensor<?xf32>
 
     %gate_inp_w = util.call @model_params.ffn_gate_inp_weight(%layer_idx) : (i32) -> tensor<?x?xf32>
     %up_exps_w = util.call @model_params.ffn_up_exps_weight(%layer_idx) : (i32) -> tensor<?x?x?xf32>
@@ -193,19 +201,21 @@ module @transformer_layer_moe_decode_components {
         %wq, %wk, %wv, %wo,
         %bq, %bk, %bv, %bo,
         %use_bias, %n_head, %n_head_kv, %n_embd,
-        %rope_freq_base, %rope_freq_scale)
+        %rope_freq_base, %rope_freq_scale,
+        %use_qk_norm, %q_norm_w, %k_norm_w, %rms_eps)
         : (tensor<?x?xf32>, tensor<?xi64>,
            tensor<?x?x?x?xf32>, tensor<?x?x?x?xf32>,
            tensor<?x?xf32>, tensor<?x?xf32>, tensor<?x?xf32>, tensor<?x?xf32>,
            tensor<?xf32>, tensor<?xf32>, tensor<?xf32>, tensor<?xf32>,
-           i1, index, index, index, f32, f32)
+           i1, index, index, index, f32, f32,
+           i1, tensor<?xf32>, tensor<?xf32>, f32)
         -> (tensor<?x?xf32>, tensor<?x?x?xf32>, tensor<?x?x?xf32>)
 
     // Scatter new K/V to cache.
     %cache_updated = util.call @kvcache_components.scatter_decode(
-        %cache, %layer, %k_new, %v_new, %block_indices, %pos_in_blocks)
+        %cache, %layer, %k_new, %v_new, %block_tables, %positions)
         : (!util.list<?>, index, tensor<?x?x?xf32>, tensor<?x?x?xf32>,
-           tensor<?xi32>, tensor<?xi32>) -> !util.list<?>
+           tensor<?x?x?xi32>, tensor<?xi64>) -> !util.list<?>
 
     // Residual connection: input + attn_out.
     %residual1_init = tensor.empty(%batch, %n_embd) : tensor<?x?xf32>

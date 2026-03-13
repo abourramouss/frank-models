@@ -80,7 +80,7 @@ module @moe_components {
 
     // Expand to [n_expert_used * n_tokens, n_in, 1] for batched matmul.
     %input_batched = tensor.expand_shape %input_flat [[0], [1, 2]]
-      output_shape [%batch_size, %n_in, %c1]
+      output_shape [%batch_size, %n_in, 1]
       : tensor<?x?xf32> into tensor<?x?x1xf32>
 
     // Step 5: Batched matrix-vector multiply.

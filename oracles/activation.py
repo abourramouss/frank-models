@@ -9,7 +9,7 @@ def silu(x: np.ndarray) -> np.ndarray:
 
 
 def swiglu(gate: np.ndarray, up: np.ndarray) -> np.ndarray:
-    """SwiGLU activation: gate * silu(up).
+    """SwiGLU activation: silu(gate) * up.
 
     Args:
         gate: Gate tensor [batch, seq, n_ff]
@@ -18,4 +18,4 @@ def swiglu(gate: np.ndarray, up: np.ndarray) -> np.ndarray:
     Returns:
         Output tensor [batch, seq, n_ff]
     """
-    return gate * silu(up)
+    return silu(gate) * up

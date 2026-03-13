@@ -4,7 +4,7 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// SwiGLU activation: gate * silu(up)
+// SwiGLU activation: silu(gate) * up
 // where silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
 //
 // Usage:
@@ -35,15 +35,15 @@ module @activation_components {
     } ins(%gate, %up : tensor<?x?x?xf32>, tensor<?x?x?xf32>)
       outs(%output_init : tensor<?x?x?xf32>) {
     ^bb0(%g: f32, %u: f32, %out: f32):
-      // silu(u) = u * sigmoid(u) = u / (1 + exp(-u))
-      %neg_u = arith.negf %u : f32
-      %exp_neg = math.exp %neg_u : f32
+      // silu(g) = g * sigmoid(g) = g / (1 + exp(-g))
+      %neg_g = arith.negf %g : f32
+      %exp_neg = math.exp %neg_g : f32
       %one = arith.constant 1.0 : f32
       %denom = arith.addf %one, %exp_neg : f32
       %sigmoid = arith.divf %one, %denom : f32
-      %silu = arith.mulf %u, %sigmoid : f32
-      // gate * silu(up)
-      %result = arith.mulf %g, %silu : f32
+      %silu = arith.mulf %g, %sigmoid : f32
+      // silu(gate) * up
+      %result = arith.mulf %silu, %u : f32
       linalg.yield %result : f32
     } -> tensor<?x?x?xf32>
 

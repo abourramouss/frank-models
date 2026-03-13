@@ -1,0 +1,373 @@
+<mxfile host="app.diagrams.net" modified="2026-03-13" type="device">
+  <diagram name="Execution Flow" id="exec-flow">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="2200" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- ============ TITLE ============ -->
+        <mxCell id="title" value="&lt;font style=&quot;font-size:18px;&quot;&gt;&lt;b&gt;IREE LLM Execution Flow&lt;/b&gt; — OLMoE-1B-7B&lt;/font&gt;" style="text;html=1;align=center;verticalAlign=middle;fontSize=18;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="200" y="15" width="500" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LAYER 1: PYTHON HOST                                         -->
+        <!-- ============================================================ -->
+        <mxCell id="py-band" value="" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;opacity=30;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="30" y="60" width="840" height="280" as="geometry"/>
+        </mxCell>
+        <mxCell id="py-label" value="&lt;font style=&quot;font-size:14px;&quot;&gt;&lt;b&gt;LAYER 1: PYTHON HOST&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#555;&quot;&gt;Handles &lt;b&gt;data-dependent&lt;/b&gt; dynamism (~μs)&lt;br&gt;argmax, EOS check, position tracking&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontColor=#2D6A2E;" vertex="1" parent="1">
+          <mxGeometry x="45" y="65" width="300" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Prefill box -->
+        <mxCell id="prefill-call" value="&lt;font style=&quot;font-size:13px;&quot;&gt;&lt;b&gt;@prefill&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;font-family:monospace;&quot;&gt;tokens[1, &lt;font color=&quot;#e6194B&quot;&gt;&lt;b&gt;S&lt;/b&gt;&lt;/font&gt;], positions[1, &lt;font color=&quot;#e6194B&quot;&gt;&lt;b&gt;S&lt;/b&gt;&lt;/font&gt;]&lt;br&gt;cache, block_tables&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;color:#888;&quot;&gt;→ logits[1, &lt;font color=&quot;#e6194B&quot;&gt;S&lt;/font&gt;, 50304]&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="60" y="130" width="175" height="75" as="geometry"/>
+        </mxCell>
+
+        <!-- argmax 1 -->
+        <mxCell id="argmax1" value="&lt;b&gt;argmax&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Python&lt;/font&gt;" style="rhombus;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="275" y="135" width="80" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- Decode box 1 -->
+        <mxCell id="decode-call1" value="&lt;font style=&quot;font-size:13px;&quot;&gt;&lt;b&gt;@decode&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;font-family:monospace;&quot;&gt;token[1], position[1]&lt;br&gt;cache, ctx_lens[16,1]&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;color:#888;&quot;&gt;→ logits[1, 50304]&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="395" y="130" width="165" height="75" as="geometry"/>
+        </mxCell>
+
+        <!-- argmax 2 -->
+        <mxCell id="argmax2" value="&lt;b&gt;argmax&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;Python&lt;/font&gt;" style="rhombus;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="600" y="135" width="80" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- Decode box 2 -->
+        <mxCell id="decode-call2" value="&lt;b&gt;@decode&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;...&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;strokeWidth=2;strokeDashPattern=4 4;" vertex="1" parent="1">
+          <mxGeometry x="720" y="140" width="100" height="55" as="geometry"/>
+        </mxCell>
+
+        <!-- EOS diamond -->
+        <mxCell id="eos" value="&lt;b&gt;EOS?&lt;/b&gt;" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="740" y="210" width="60" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- arrows in python layer -->
+        <mxCell id="arr-p1" style="strokeColor=#82b366;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" source="prefill-call" target="argmax1" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="arr-p2" style="strokeColor=#82b366;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" source="argmax1" target="decode-call1" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="arr-p3" style="strokeColor=#82b366;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" source="decode-call1" target="argmax2" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="arr-p4" style="strokeColor=#82b366;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" source="argmax2" target="decode-call2" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="arr-eos" style="strokeColor=#b85450;strokeWidth=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" source="decode-call2" target="eos" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- Python updates label -->
+        <mxCell id="py-updates" value="&lt;font style=&quot;font-size:9px;&quot;&gt;Between each invocation Python does:&lt;br&gt;&lt;code&gt;pos += 1&lt;/code&gt;, &lt;code&gt;ctx_lens += 1&lt;/code&gt;, &lt;code&gt;next_tok = argmax(logits)&lt;/code&gt;&lt;br&gt;Then passes these as &lt;b&gt;concrete inputs&lt;/b&gt; to the next MLIR call.&lt;/font&gt;" style="text;html=1;align=left;fontColor=#2D6A2E;" vertex="1" parent="1">
+          <mxGeometry x="60" y="225" width="450" height="45" as="geometry"/>
+        </mxCell>
+
+        <!-- Zoom-in arrow from @prefill/@decode to Layer 2 -->
+        <mxCell id="zoom-label" value="&lt;font style=&quot;font-size:10px;&quot;&gt;Each @prefill / @decode call is &lt;b&gt;one IREE invocation&lt;/b&gt;.&lt;br&gt;Inside, the VM sequences ~500-66000 dispatches ↓&lt;/font&gt;" style="text;html=1;align=center;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="200" y="280" width="400" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="zoom-arrow" style="strokeColor=#555;strokeWidth=2;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="440" y="315" as="sourcePoint"/>
+            <mxPoint x="440" y="360" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- LAYER 2: IREE VM SEQUENCING                                  -->
+        <!-- ============================================================ -->
+        <mxCell id="vm-band" value="" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=25;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="30" y="360" width="840" height="620" as="geometry"/>
+        </mxCell>
+        <mxCell id="vm-label" value="&lt;font style=&quot;font-size:14px;&quot;&gt;&lt;b&gt;LAYER 2: IREE VM&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#555;&quot;&gt;Handles &lt;b&gt;input-dependent&lt;/b&gt; dynamism (~ns)&lt;br&gt;&lt;code&gt;tensor&amp;lt;?x?xf32&amp;gt;&lt;/code&gt; dims resolved from input shapes &lt;b&gt;before&lt;/b&gt; first dispatch&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontColor=#2D5F8A;" vertex="1" parent="1">
+          <mxGeometry x="45" y="365" width="400" height="55" as="geometry"/>
+        </mxCell>
+
+        <!-- The VM dispatch sequence as a simple flow -->
+        <mxCell id="embed" value="&lt;b&gt;embed&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="430" width="80" height="35" as="geometry"/>
+        </mxCell>
+
+        <!-- Layer loop box -->
+        <mxCell id="layer-loop" value="" style="rounded=1;fillColor=none;strokeColor=#8B6D1F;strokeDashPattern=6 3;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="50" y="485" width="810" height="400" as="geometry"/>
+        </mxCell>
+        <mxCell id="loop-label" value="&lt;font style=&quot;font-size:11px;color:#8B6D1F;&quot;&gt;&lt;b&gt;scf.for layer = 0..15&lt;/b&gt; (16 iterations, not unrolled)&lt;/font&gt;" style="text;html=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="60" y="488" width="350" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- ATTENTION sub-block -->
+        <mxCell id="attn-box" value="" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;opacity=40;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="65" y="515" width="780" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="attn-label" value="&lt;font style=&quot;font-size:11px;&quot;&gt;&lt;b&gt;ATTENTION BLOCK&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=left;fontColor=#2D5F8A;" vertex="1" parent="1">
+          <mxGeometry x="75" y="518" width="150" height="16" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="a-norm" value="&lt;b&gt;rms_norm&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="80" y="542" width="80" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="a-qkv" value="&lt;b&gt;Q K V proj&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;×3 same kernel&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="175" y="538" width="90" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="a-rope" value="&lt;b&gt;norm+RoPE&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="280" y="542" width="80" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="a-attn" value="&lt;b&gt;★ attention&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;QK&lt;sup&gt;T&lt;/sup&gt;+softmax+AV&lt;br&gt;FUSED 1 dispatch&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="375" y="535" width="105" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="a-oproj" value="&lt;b&gt;O proj&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;+ residual (fused)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="495" y="538" width="95" height="38" as="geometry"/>
+        </mxCell>
+
+        <!-- Attention flow arrows -->
+        <mxCell id="aa1" style="strokeColor=#999;strokeWidth=1;" edge="1" source="a-norm" target="a-qkv" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="aa2" style="strokeColor=#999;strokeWidth=1;" edge="1" source="a-qkv" target="a-rope" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="aa3" style="strokeColor=#999;strokeWidth=1;" edge="1" source="a-rope" target="a-attn" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="aa4" style="strokeColor=#999;strokeWidth=1;" edge="1" source="a-attn" target="a-oproj" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- Attention scaling callouts -->
+        <mxCell id="a-attn-scale" value="&lt;font style=&quot;font-size:8px;color:#b85450;&quot;&gt;prefill: &lt;b&gt;S×S&lt;/b&gt; attention matrix&lt;br&gt;decode: 1×&lt;b&gt;ctx_len&lt;/b&gt; (grows each step)&lt;br&gt;no flash attention!&lt;/font&gt;" style="text;html=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="370" y="583" width="180" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- KV cache -->
+        <mxCell id="kv-cache" value="&lt;b&gt;KV cache scatter&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;color:#ff9800;&quot;&gt;⚠ &lt;code&gt;slow_memcpy&lt;/code&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="610" y="535" width="120" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="aa5" style="strokeColor=#999;strokeWidth=1;" edge="1" source="a-oproj" target="kv-cache" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="kv-scale" value="&lt;font style=&quot;font-size:8px;color:#d6b656;&quot;&gt;prefill: loops &lt;b&gt;S&lt;/b&gt; times → 4S dispatches!&lt;br&gt;decode: 2 dispatches (1 token)&lt;/font&gt;" style="text;html=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="600" y="575" width="200" height="28" as="geometry"/>
+        </mxCell>
+
+        <!-- Decode-only: KV gather -->
+        <mxCell id="kv-gather" value="&lt;b&gt;KV gather&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;color:#ff9800;&quot;&gt;decode only: &lt;code&gt;slow_memcpy&lt;/code&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="748" y="535" width="90" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="aa6" style="strokeColor=#d6b656;strokeWidth=1;dashed=1;" edge="1" source="kv-cache" target="kv-gather" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- MoE sub-block -->
+        <mxCell id="moe-box" value="" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;opacity=40;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="65" y="700" width="780" height="170" as="geometry"/>
+        </mxCell>
+        <mxCell id="moe-label" value="&lt;font style=&quot;font-size:11px;&quot;&gt;&lt;b&gt;MoE FFN BLOCK&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=left;fontColor=#8B6D1F;" vertex="1" parent="1">
+          <mxGeometry x="75" y="703" width="150" height="16" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="m-norm" value="&lt;b&gt;rms_norm&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="80" y="730" width="80" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="m-router" value="&lt;b&gt;router&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;softmax+topk&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="178" y="726" width="80" height="38" as="geometry"/>
+        </mxCell>
+        <mxCell id="m-gather" value="&lt;b&gt;★ gather&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;8 expert wts&lt;br&gt;×3 (g/u/d)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="275" y="722" width="90" height="46" as="geometry"/>
+        </mxCell>
+        <mxCell id="m-ffn" value="&lt;b&gt;★ expert FFN&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;gate→swiglu→down&lt;br&gt;&lt;b&gt;D = 8×S&lt;/b&gt; matmuls&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="383" y="722" width="110" height="46" as="geometry"/>
+        </mxCell>
+        <mxCell id="m-sum" value="&lt;b&gt;weighted&lt;br&gt;sum&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:8px;&quot;&gt;+ residual&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="510" y="722" width="75" height="46" as="geometry"/>
+        </mxCell>
+
+        <!-- MoE flow arrows -->
+        <mxCell id="ma1" style="strokeColor=#999;strokeWidth=1;" edge="1" source="m-norm" target="m-router" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ma2" style="strokeColor=#999;strokeWidth=1;" edge="1" source="m-router" target="m-gather" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ma3" style="strokeColor=#999;strokeWidth=1;" edge="1" source="m-gather" target="m-ffn" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ma4" style="strokeColor=#999;strokeWidth=1;" edge="1" source="m-ffn" target="m-sum" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- MoE scaling callout -->
+        <mxCell id="m-scale" value="&lt;font style=&quot;font-size:8px;color:#b85450;&quot;&gt;prefill S=1024: gather creates &lt;b&gt;[8192, 1024, 2048]&lt;/b&gt;&lt;br&gt;= ~67 GB gathered weights per layer!&lt;br&gt;decode: [8, 1024, 2048] — tiny, &lt;b&gt;memory-bound&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="355" y="772" width="260" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- MoE data-dependent callout -->
+        <mxCell id="m-datadep" value="&lt;font style=&quot;font-size:8px;color:#8B6D1F;&quot;&gt;WHICH 8 of 64 experts → &lt;b&gt;data-dependent values&lt;/b&gt;&lt;br&gt;but the SHAPE is always [8×tokens, ...]  → &lt;b&gt;fixed allocation&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="80" y="772" width="280" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- Loopback arrow from end of MoE to next layer -->
+        <mxCell id="loop-back" value="&lt;font style=&quot;font-size:8px;color:#8B6D1F;&quot;&gt;next layer →&lt;/font&gt;" style="text;html=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="600" y="740" width="80" height="14" as="geometry"/>
+        </mxCell>
+        <mxCell id="loop-arrow" style="strokeColor=#8B6D1F;strokeWidth=1;dashed=1;curved=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="585" y="745" as="sourcePoint"/>
+            <mxPoint x="680" y="745" as="targetPoint"/>
+            <Array as="points">
+              <mxPoint x="630" y="730"/>
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Connection: embed to attn -->
+        <mxCell id="e2a" style="strokeColor=#999;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="100" y="465" as="sourcePoint"/>
+            <mxPoint x="100" y="515" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Connection: attn to MoE (via residual stream) -->
+        <mxCell id="a2m" style="strokeColor=#999;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="100" y="685" as="sourcePoint"/>
+            <mxPoint x="100" y="700" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Output proj -->
+        <mxCell id="output-proj" value="&lt;b&gt;final_norm + output_proj&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px;&quot;&gt;→ logits [&lt;font color=&quot;#e6194B&quot;&gt;S&lt;/font&gt;, 50304]&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="900" width="180" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="o2o" style="strokeColor=#999;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="100" y="885" as="sourcePoint"/>
+            <mxPoint x="100" y="900" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Return to Python -->
+        <mxCell id="return-arrow" value="" style="strokeColor=#82b366;strokeWidth=2;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="240" y="920" as="sourcePoint"/>
+            <mxPoint x="350" y="920" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="return-label" value="&lt;font style=&quot;font-size:9px;color:#2D6A2E;&quot;&gt;logits → Python → argmax → next @decode call&lt;/font&gt;" style="text;html=1;align=left;" vertex="1" parent="1">
+          <mxGeometry x="360" y="912" width="300" height="16" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- Zoom into a single dispatch → LAYER 3                        -->
+        <!-- ============================================================ -->
+        <mxCell id="sched-zoom" value="&lt;font style=&quot;font-size:10px;&quot;&gt;Each box above = 1+ &lt;b&gt;dispatches&lt;/b&gt;. Each dispatch is tiled for parallel execution ↓&lt;/font&gt;" style="text;html=1;align=center;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="175" y="965" width="450" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="sched-arrow" style="strokeColor=#555;strokeWidth=2;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="440" y="990" as="sourcePoint"/>
+            <mxPoint x="440" y="1020" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="sched-band" value="" style="rounded=1;fillColor=#E8D5F5;strokeColor=#9673a6;opacity=30;arcSize=4;" vertex="1" parent="1">
+          <mxGeometry x="30" y="1020" width="840" height="310" as="geometry"/>
+        </mxCell>
+        <mxCell id="sched-label" value="&lt;font style=&quot;font-size:14px;&quot;&gt;&lt;b&gt;LAYER 3: WORK-STEALING SCHEDULER&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#555;&quot;&gt;Handles &lt;b&gt;computational&lt;/b&gt; parallelism (~ms)&lt;br&gt;Same scheduler for CPU threads, GPU warps, NPU tiles&lt;/font&gt;" style="text;html=1;align=left;verticalAlign=top;fontColor=#7B4F9E;" vertex="1" parent="1">
+          <mxGeometry x="45" y="1025" width="400" height="55" as="geometry"/>
+        </mxCell>
+
+        <!-- Example: one dispatch tiled -->
+        <mxCell id="dispatch-example" value="&lt;font style=&quot;font-size:10px;&quot;&gt;Example: &lt;b&gt;Q projection dispatch&lt;/b&gt; = matmul [S, 2048] × [2048, 2048]&lt;/font&gt;" style="text;html=1;align=center;fontColor=#7B4F9E;" vertex="1" parent="1">
+          <mxGeometry x="150" y="1080" width="500" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- Dispatch box -->
+        <mxCell id="dispatch-box" value="&lt;font style=&quot;font-size:10px;font-family:monospace;&quot;&gt;dispatch_17: batch_matmul_DxDx2048x2048&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="160" y="1105" width="320" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- Tiling arrow -->
+        <mxCell id="tile-arrow" value="&lt;font style=&quot;font-size:9px;color:#7B4F9E;&quot;&gt;tile into work items&lt;/font&gt;" style="text;html=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="500" y="1108" width="120" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="tile-arr" style="strokeColor=#9673a6;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="320" y="1135" as="sourcePoint"/>
+            <mxPoint x="320" y="1160" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Work items grid -->
+        <mxCell id="tile0" value="&lt;font style=&quot;font-size:7px;&quot;&gt;tile&lt;br&gt;(0,0)&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=7;" vertex="1" parent="1">
+          <mxGeometry x="80" y="1160" width="55" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="tile1" value="&lt;font style=&quot;font-size:7px;&quot;&gt;tile&lt;br&gt;(0,1)&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=7;" vertex="1" parent="1">
+          <mxGeometry x="135" y="1160" width="55" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="tile2" value="&lt;font style=&quot;font-size:7px;&quot;&gt;tile&lt;br&gt;(0,2)&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=7;" vertex="1" parent="1">
+          <mxGeometry x="190" y="1160" width="55" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="tile3" value="&lt;font style=&quot;font-size:7px;&quot;&gt;tile&lt;br&gt;(0,3)&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=7;" vertex="1" parent="1">
+          <mxGeometry x="245" y="1160" width="55" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="tile4" value="&lt;font style=&quot;font-size:7px;&quot;&gt;tile&lt;br&gt;(1,0)&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=7;" vertex="1" parent="1">
+          <mxGeometry x="300" y="1160" width="55" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="tile5" value="&lt;font style=&quot;font-size:7px;&quot;&gt;tile&lt;br&gt;(1,1)&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=7;" vertex="1" parent="1">
+          <mxGeometry x="355" y="1160" width="55" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="tile-dots" value="&lt;font style=&quot;font-size:10px;&quot;&gt;. . .&lt;/font&gt;" style="text;html=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="415" y="1165" width="40" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="tile-n" value="&lt;font style=&quot;font-size:7px;&quot;&gt;tile&lt;br&gt;(M,N)&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=7;" vertex="1" parent="1">
+          <mxGeometry x="460" y="1160" width="55" height="35" as="geometry"/>
+        </mxCell>
+
+        <!-- Worker threads -->
+        <mxCell id="steal-label" value="&lt;font style=&quot;font-size:9px;color:#7B4F9E;&quot;&gt;worker threads &lt;b&gt;steal&lt;/b&gt; from shared queue — no thread idle while work remains&lt;/font&gt;" style="text;html=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="100" y="1200" width="420" height="16" as="geometry"/>
+        </mxCell>
+        <mxCell id="steal-arrows" style="strokeColor=#9673a6;strokeWidth=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="280" y="1218" as="sourcePoint"/>
+            <mxPoint x="280" y="1240" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="t0" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;T0&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9673a6;fontColor=#fff;strokeColor=#7B4F9E;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="80" y="1240" width="45" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="t1" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;T1&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9673a6;fontColor=#fff;strokeColor=#7B4F9E;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="130" y="1240" width="45" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="t2" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;T2&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9673a6;fontColor=#fff;strokeColor=#7B4F9E;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="180" y="1240" width="45" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="t3" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;T3&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9673a6;fontColor=#fff;strokeColor=#7B4F9E;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="230" y="1240" width="45" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="t-dots" value="&lt;font style=&quot;font-size:10px;&quot;&gt;. . .&lt;/font&gt;" style="text;html=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="280" y="1240" width="40" height="25" as="geometry"/>
+        </mxCell>
+        <mxCell id="tN" value="&lt;font style=&quot;font-size:8px;&quot;&gt;&lt;b&gt;TN&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#9673a6;fontColor=#fff;strokeColor=#7B4F9E;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="325" y="1240" width="45" height="25" as="geometry"/>
+        </mxCell>
+
+        <!-- Backend callout -->
+        <mxCell id="backend" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;Same scheduler, any backend:&lt;/b&gt;&lt;br&gt;CPU → threads steal tiles across cores&lt;br&gt;GPU → workgroups map to SMs/CUs&lt;br&gt;NPU → tiles map to compute units&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=9;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="560" y="1130" width="260" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- Scheduler key insight -->
+        <mxCell id="sched-insight" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;The multiplier:&lt;/b&gt; a matmul that takes 10ms on 1 core&lt;br&gt;takes ~10ms/N on N cores. This applies to &lt;b&gt;every&lt;/b&gt; dispatch —&lt;br&gt;attention, MoE, norms — the scheduler doesn't know the difference.&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8D5F5;strokeColor=#9673a6;fontSize=9;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="560" y="1210" width="280" height="55" as="geometry"/>
+        </mxCell>
+
+        <!-- ============================================================ -->
+        <!-- DISPATCH COUNT + WHERE IT BREAKS                             -->
+        <!-- ============================================================ -->
+        <mxCell id="numbers-title" value="&lt;font style=&quot;font-size:13px;&quot;&gt;&lt;b&gt;Where It Breaks at Scale&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;fontColor=#333;" vertex="1" parent="1">
+          <mxGeometry x="230" y="1350" width="300" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Prefill costs -->
+        <mxCell id="cost-prefill" value="&lt;div style=&quot;text-align:left;padding:6px;&quot;&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;&lt;b&gt;Prefill (S tokens, 16 layers)&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#b85450&quot;&gt;★ &lt;b&gt;Attention:&lt;/b&gt; S×S scores (no flash)&lt;br&gt;&amp;nbsp;&amp;nbsp;S=4096 → 16M float attention matrix / head&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#d6b656&quot;&gt;⚠ &lt;b&gt;KV scatter:&lt;/b&gt; 4S slow_memcpy dispatches / layer&lt;br&gt;&amp;nbsp;&amp;nbsp;S=1024 → 65536 extra dispatches total!&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#b85450&quot;&gt;★ &lt;b&gt;MoE gather:&lt;/b&gt; [8S, embd, ff] intermediates&lt;br&gt;&amp;nbsp;&amp;nbsp;S=1024 → ~67 GB gathered weights / layer&lt;/font&gt;&lt;/font&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF;strokeColor=#b85450;align=left;fontSize=10;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="50" y="1380" width="370" height="175" as="geometry"/>
+        </mxCell>
+
+        <!-- Decode costs -->
+        <mxCell id="cost-decode" value="&lt;div style=&quot;text-align:left;padding:6px;&quot;&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;&lt;b&gt;Decode (1 token, 16 layers)&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#6c8ebf&quot;&gt;&lt;b&gt;Fixed ~643 dispatches&lt;/b&gt; (no S scaling)&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#b85450&quot;&gt;★ &lt;b&gt;Attention:&lt;/b&gt; reads growing ctx_len KV entries&lt;br&gt;&amp;nbsp;&amp;nbsp;memory bandwidth cost grows linearly&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font color=&quot;#999&quot;&gt;★ &lt;b&gt;All matmuls are GEMV:&lt;/b&gt; [1, 2048] × [2048, N]&lt;br&gt;&amp;nbsp;&amp;nbsp;memory-bound, not compute-bound&lt;br&gt;&amp;nbsp;&amp;nbsp;poor utilization of parallel cores&lt;/font&gt;&lt;/font&gt;&lt;/div&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF;strokeColor=#6c8ebf;align=left;fontSize=10;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="450" y="1380" width="380" height="175" as="geometry"/>
+        </mxCell>
+
+        <!-- Kernel reuse note -->
+        <mxCell id="reuse-note" value="&lt;font style=&quot;font-size:9px;&quot;&gt;&lt;b&gt;Kernel reuse:&lt;/b&gt; 8+ dispatch kernels compiled once, shared between prefill &amp;amp; decode.&lt;br&gt;Same code, different &lt;code&gt;D&lt;/code&gt; value at invocation time — that's the &lt;code&gt;tensor&amp;lt;?x?xf32&amp;gt;&lt;/code&gt; mechanism.&lt;/font&gt;" style="text;html=1;align=center;fontColor=#555;" vertex="1" parent="1">
+          <mxGeometry x="100" y="1565" width="650" height="28" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

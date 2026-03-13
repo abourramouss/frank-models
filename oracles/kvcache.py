@@ -100,38 +100,38 @@ def gather(
 
 
 def scatter_decode(
-    cache: np.ndarray,  # [n_blocks, block_size, n_head_kv, head_dim]
-    layer: int,  # which transformer layer (unused, for API consistency)
-    new_vals: np.ndarray,  # [batch, n_head_kv, head_dim] - ONE token per sequence
-    block_indices: np.ndarray,  # [batch] int32 - which block for each sequence
-    pos_in_blocks: np.ndarray,  # [batch] int32 - position within block
+    cache: np.ndarray,        # [n_blocks, block_size, n_head_kv, head_dim]
+    layer: int,               # which transformer layer (for block_tables indexing)
+    new_vals: np.ndarray,     # [batch, n_head_kv, head_dim] - ONE token per sequence
+    block_tables: np.ndarray, # [n_layers, batch, max_blocks_per_seq] int32
+    positions: np.ndarray,    # [batch] int64 - absolute token positions
 ) -> np.ndarray:
     """Scatter one new token per sequence to paged cache (decode phase).
 
-    All control data (block_indices, pos_in_blocks) treated as device arrays
-    to match MLIR semantics.
-
-    Note: layer parameter is included for API consistency with gather, but
-    scatter_decode writes directly to physical blocks (no layer slicing needed
-    since all layers share the same physical block pool).
+    Uses block_tables + absolute positions, matching the MLIR scatter_decode API.
+    Computes logical_block = position // block_size, pos_in_block = position % block_size,
+    then resolves physical block via block_tables[layer, seq, logical_block].
 
     Args:
         cache: Block pool [n_blocks, block_size, n_head_kv, head_dim]
-        layer: Which transformer layer (unused, for API consistency)
+        layer: Which transformer layer (for block_tables indexing)
         new_vals: New values [batch, n_head_kv, head_dim] - ONE token per sequence
-        block_indices: [batch] which block for each sequence
-        pos_in_blocks: [batch] position within block for each sequence
+        block_tables: [n_layers, batch, max_blocks_per_seq] mapping logical to physical
+        positions: [batch] absolute position for each sequence
 
     Returns:
         Updated cache (copy, not in-place)
     """
     result = cache.copy()
-    batch_size = len(block_indices)
+    block_size = cache.shape[1]
+    block_tables_layer = block_tables[layer]  # [batch, max_blocks]
 
-    for i in range(batch_size):
-        block_idx = int(block_indices[i])
-        pos = int(pos_in_blocks[i])
-        result[block_idx, pos, :, :] = new_vals[i, :, :]
+    for i in range(len(positions)):
+        pos = int(positions[i])
+        logical_block = pos // block_size
+        pos_in_block = pos % block_size
+        physical_block = int(block_tables_layer[i, logical_block])
+        result[physical_block, pos_in_block, :, :] = new_vals[i, :, :]
 
     return result
 

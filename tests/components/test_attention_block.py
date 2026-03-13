@@ -1,8 +1,4 @@
-"""Tests for Full Attention Block component.
-
-XFAIL: Depends on attention_gqa which crashes with dynamic shapes.
-https://github.com/iree-org/iree/issues/23277
-"""
+"""Tests for Full Attention Block component."""
 
 import numpy as np
 import pytest
@@ -13,7 +9,6 @@ from oracles.attention import attention_block as attention_block_oracle
 
 @pytest.fixture(scope="module")
 def attention_block_module(iree_cfg):
-    pytest.xfail("iree-org/iree#23277: dynamic shapes + attention op")
     return link_and_compile(
         main_path="attention/attention_block.mlir",
         library_paths=[

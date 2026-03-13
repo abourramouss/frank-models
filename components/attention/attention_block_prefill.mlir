@@ -27,6 +27,12 @@
 module @attention_block_prefill_components {
 
   // External dependencies resolved by iree-link.
+  util.func private @rms_norm_components.rms_norm_linalg(
+      tensor<?x?xf32>,    // [n_tokens, hidden_dim]
+      tensor<?xf32>,       // [hidden_dim]
+      f32                  // epsilon
+  ) -> tensor<?x?xf32>
+
   util.func private @position_components.rope(
       tensor<?x?x?x?xf32>,   // [batch, seq_len, n_head, head_dim]
       tensor<?x?xi64>,        // [batch, seq_len]
@@ -57,7 +63,11 @@ module @attention_block_prefill_components {
       %n_head_kv: index,
       %n_embd: index,
       %rope_freq_base: f32,
-      %rope_freq_scale: f32
+      %rope_freq_scale: f32,
+      %use_qk_norm: i1,                  // flag to enable/disable QK norm
+      %q_norm_weight: tensor<?xf32>,     // [n_embd] - may be dummy if not used
+      %k_norm_weight: tensor<?xf32>,     // [n_embd_kv] - may be dummy if not used
+      %rms_eps: f32                      // epsilon for QK norm
   ) -> (tensor<?x?x?xf32>,               // output: [batch, seq_len, n_embd]
         tensor<?x?x?x?xf32>,             // k_out: [batch, seq_len, n_head_kv, head_dim]
         tensor<?x?x?x?xf32>) {           // v_out: [batch, seq_len, n_head_kv, head_dim]
@@ -185,16 +195,90 @@ module @attention_block_prefill_components {
       scf.yield %v_proj : tensor<?x?x?xf32>
     }
 
+    // Conditionally apply QK norm (RMS norm on flat Q/K projections before reshape).
+    // Applied to [batch, seq_len, n_embd] (Q) or [batch, seq_len, n_embd_kv] (K).
+    %q_normed = scf.if %use_qk_norm -> (tensor<?x?x?xf32>) {
+      %q_flat = tensor.collapse_shape %q_final [[0, 1], [2]]
+          : tensor<?x?x?xf32> into tensor<?x?xf32>
+      %q_normed_flat = util.call @rms_norm_components.rms_norm_linalg(
+          %q_flat, %q_norm_weight, %rms_eps)
+          : (tensor<?x?xf32>, tensor<?xf32>, f32) -> tensor<?x?xf32>
+      %q_normed_3d = tensor.expand_shape %q_normed_flat [[0, 1], [2]]
+          output_shape [%batch, %seq_len, %n_embd]
+          : tensor<?x?xf32> into tensor<?x?x?xf32>
+      scf.yield %q_normed_3d : tensor<?x?x?xf32>
+    } else {
+      scf.yield %q_final : tensor<?x?x?xf32>
+    }
+
+    %k_normed = scf.if %use_qk_norm -> (tensor<?x?x?xf32>) {
+      %k_flat = tensor.collapse_shape %k_final [[0, 1], [2]]
+          : tensor<?x?x?xf32> into tensor<?x?xf32>
+      %k_normed_flat = util.call @rms_norm_components.rms_norm_linalg(
+          %k_flat, %k_norm_weight, %rms_eps)
+          : (tensor<?x?xf32>, tensor<?xf32>, f32) -> tensor<?x?xf32>
+      %k_normed_3d = tensor.expand_shape %k_normed_flat [[0, 1], [2]]
+          output_shape [%batch, %seq_len, %n_embd_kv]
+          : tensor<?x?xf32> into tensor<?x?x?xf32>
+      scf.yield %k_normed_3d : tensor<?x?x?xf32>
+    } else {
+      scf.yield %k_final : tensor<?x?x?xf32>
+    }
+
     // Reshape for multi-head: [batch, seq_len, n_embd] -> [batch, seq_len, n_head, head_dim]
+    // Use linalg.generic + linalg.index instead of tensor.expand_shape to avoid an IREE
+    // GlobalOpt bug: when n_head and head_dim are constant-folded to static values, IREE
+    // produces expand_shape with static_output_shape = array<i64> (empty) → verifier crash.
     %head_dim = arith.divsi %n_embd, %n_head : index
     %head_dim_kv = arith.divsi %n_embd_kv, %n_head_kv : index
 
-    %q_reshaped = tensor.expand_shape %q_final [[0], [1], [2, 3]] output_shape [%batch, %seq_len, %n_head, %head_dim]
-        : tensor<?x?x?xf32> into tensor<?x?x?x?xf32>
-    %k_reshaped = tensor.expand_shape %k_final [[0], [1], [2, 3]] output_shape [%batch, %seq_len, %n_head_kv, %head_dim_kv]
-        : tensor<?x?x?xf32> into tensor<?x?x?x?xf32>
-    %v_reshaped = tensor.expand_shape %v_final [[0], [1], [2, 3]] output_shape [%batch, %seq_len, %n_head_kv, %head_dim_kv]
-        : tensor<?x?x?xf32> into tensor<?x?x?x?xf32>
+    %q_reshaped_init = tensor.empty(%batch, %seq_len, %n_head, %head_dim) : tensor<?x?x?x?xf32>
+    %q_reshaped = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
+      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
+    } outs(%q_reshaped_init : tensor<?x?x?x?xf32>) {
+    ^bb0(%out: f32):
+      %i0 = linalg.index 0 : index
+      %i1 = linalg.index 1 : index
+      %i2 = linalg.index 2 : index
+      %i3 = linalg.index 3 : index
+      %flat = arith.muli %i2, %head_dim : index
+      %flat_idx = arith.addi %flat, %i3 : index
+      %val = tensor.extract %q_normed[%i0, %i1, %flat_idx] : tensor<?x?x?xf32>
+      linalg.yield %val : f32
+    } -> tensor<?x?x?x?xf32>
+
+    %k_reshaped_init = tensor.empty(%batch, %seq_len, %n_head_kv, %head_dim_kv) : tensor<?x?x?x?xf32>
+    %k_reshaped = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
+      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
+    } outs(%k_reshaped_init : tensor<?x?x?x?xf32>) {
+    ^bb0(%out: f32):
+      %i0 = linalg.index 0 : index
+      %i1 = linalg.index 1 : index
+      %i2 = linalg.index 2 : index
+      %i3 = linalg.index 3 : index
+      %flat = arith.muli %i2, %head_dim_kv : index
+      %flat_idx = arith.addi %flat, %i3 : index
+      %val = tensor.extract %k_normed[%i0, %i1, %flat_idx] : tensor<?x?x?xf32>
+      linalg.yield %val : f32
+    } -> tensor<?x?x?x?xf32>
+
+    %v_reshaped_init = tensor.empty(%batch, %seq_len, %n_head_kv, %head_dim_kv) : tensor<?x?x?x?xf32>
+    %v_reshaped = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
+      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
+    } outs(%v_reshaped_init : tensor<?x?x?x?xf32>) {
+    ^bb0(%out: f32):
+      %i0 = linalg.index 0 : index
+      %i1 = linalg.index 1 : index
+      %i2 = linalg.index 2 : index
+      %i3 = linalg.index 3 : index
+      %flat = arith.muli %i2, %head_dim_kv : index
+      %flat_idx = arith.addi %flat, %i3 : index
+      %val = tensor.extract %v_final[%i0, %i1, %flat_idx] : tensor<?x?x?xf32>
+      linalg.yield %val : f32
+    } -> tensor<?x?x?x?xf32>
 
     // Apply RoPE to query and key.
     // K with RoPE will be stored in cache.

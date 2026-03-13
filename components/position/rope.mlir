@@ -5,7 +5,14 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 // Rotary Position Embeddings (RoPE).
-// Applies rotation to adjacent dimension pairs based on position.
+// Uses the "rotate_half" convention (HuggingFace / LLaMA style):
+//   dimension i pairs with dimension i + head_dim/2.
+//
+// For position p and frequency freq[i]:
+//   out[..., i]             = input[..., i] * cos(p * freq[i])
+//                           - input[..., i + half_dim] * sin(p * freq[i])
+//   out[..., i + half_dim]  = input[..., i + half_dim] * cos(p * freq[i])
+//                           + input[..., i] * sin(p * freq[i])
 //
 // Usage:
 //   %output = call @rope(%input, %positions, %freq_base, %freq_scale)
@@ -29,11 +36,7 @@ module @position_components {
     %n_head = tensor.dim %input, %c2 : tensor<?x?x?x?xf32>
     %head_dim = tensor.dim %input, %c3 : tensor<?x?x?x?xf32>
 
-    // Reshape to expose dimension pairs: [batch, seq_len, n_head, head_dim]
-    // -> [batch, seq_len, n_head, head_dim/2, 2]
     %half_dim = arith.divsi %head_dim, %c2 : index
-    %reshaped = tensor.expand_shape %input [[0], [1], [2], [3, 4]] output_shape [%batch, %seq_len, %n_head, %half_dim, 2]
-        : tensor<?x?x?x?xf32> into tensor<?x?x?x?x2xf32>
 
     // Compute frequencies for each dimension pair.
     // freq[i] = (1.0 / base^(2i/head_dim)) * freq_scale
@@ -58,54 +61,70 @@ module @position_components {
       linalg.yield %freq : f32
     } -> tensor<?xf32>
 
-    // Apply RoPE rotation to paired elements.
-    %output_init = tensor.empty(%batch, %seq_len, %n_head, %half_dim) : tensor<?x?x?x?x2xf32>
-    %rotated = linalg.generic {
+    // Apply RoPE with half-style pairing (HuggingFace rotate_half convention).
+    // Dimension i pairs with dimension i + half_dim (NOT interleaved).
+    //
+    // For d3 < half_dim:
+    //   out[..., d3] = input[..., d3] * cos - input[..., d3 + half_dim] * sin
+    // For d3 >= half_dim (let j = d3 - half_dim):
+    //   out[..., d3] = input[..., d3] * cos + input[..., j] * sin
+    %output_init = tensor.empty(%batch, %seq_len, %n_head, %head_dim) : tensor<?x?x?x?xf32>
+    %output = linalg.generic {
       indexing_maps = [
-        affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3, 0)>,  // x0 (first of pair)
-        affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3, 1)>,  // x1 (second of pair)
-        affine_map<(d0, d1, d2, d3, d4) -> (d0, d1)>,             // position
-        affine_map<(d0, d1, d2, d3, d4) -> (d3)>,                 // frequency
-        affine_map<(d0, d1, d2, d3, d4) -> (d0, d1, d2, d3, d4)>  // output
+        affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
       ],
-      iterator_types = ["parallel", "parallel", "parallel", "parallel", "parallel"]
-    } ins(%reshaped, %reshaped, %positions, %freqs : tensor<?x?x?x?x2xf32>, tensor<?x?x?x?x2xf32>, tensor<?x?xi64>, tensor<?xf32>)
-      outs(%output_init : tensor<?x?x?x?x2xf32>) {
-    ^bb0(%x0: f32, %x1: f32, %pos_i64: i64, %freq: f32, %out: f32):
-      // Compute angle = position * frequency.
+      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
+    } outs(%output_init : tensor<?x?x?x?xf32>) {
+    ^bb0(%out: f32):
+      %i0 = linalg.index 0 : index
+      %i1 = linalg.index 1 : index
+      %i2 = linalg.index 2 : index
+      %i3 = linalg.index 3 : index
+
+      // Get position for this (batch, seq) element.
+      %pos_i64 = tensor.extract %positions[%i0, %i1] : tensor<?x?xi64>
       %pos_i32 = arith.trunci %pos_i64 : i64 to i32
       %pos_f32 = arith.sitofp %pos_i32 : i32 to f32
-      %angle = arith.mulf %pos_f32, %freq : f32
 
-      %cos_val = math.cos %angle : f32
-      %sin_val = math.sin %angle : f32
+      // Determine which half we're in.
+      %is_first_half = arith.cmpi slt, %i3, %half_dim : index
 
-      // Apply rotation matrix to pair.
-      // x0' = x0*cos - x1*sin
-      // x1' = x0*sin + x1*cos
-      %pair_idx = linalg.index 4 : index
-      %c0_idx = arith.constant 0 : index
-      %is_first = arith.cmpi eq, %pair_idx, %c0_idx : index
+      %result = scf.if %is_first_half -> (f32) {
+        // First half (d3 < half_dim): freq_idx = d3, partner = d3 + half_dim
+        %freq = tensor.extract %freqs[%i3] : tensor<?xf32>
+        %angle = arith.mulf %pos_f32, %freq : f32
+        %cos_val = math.cos %angle : f32
+        %sin_val = math.sin %angle : f32
 
-      %result = scf.if %is_first -> (f32) {
-        // First element: x0' = x0*cos - x1*sin
+        %x0 = tensor.extract %input[%i0, %i1, %i2, %i3] : tensor<?x?x?x?xf32>
+        %partner = arith.addi %i3, %half_dim : index
+        %x1 = tensor.extract %input[%i0, %i1, %i2, %partner] : tensor<?x?x?x?xf32>
+
+        // out = x0 * cos - x1 * sin
         %x0_cos = arith.mulf %x0, %cos_val : f32
         %x1_sin = arith.mulf %x1, %sin_val : f32
-        %rotated = arith.subf %x0_cos, %x1_sin : f32
-        scf.yield %rotated : f32
+        %r = arith.subf %x0_cos, %x1_sin : f32
+        scf.yield %r : f32
       } else {
-        // Second element: x1' = x0*sin + x1*cos
+        // Second half (d3 >= half_dim): freq_idx = d3 - half_dim, partner = d3 - half_dim
+        %freq_idx = arith.subi %i3, %half_dim : index
+        %freq = tensor.extract %freqs[%freq_idx] : tensor<?xf32>
+        %angle = arith.mulf %pos_f32, %freq : f32
+        %cos_val = math.cos %angle : f32
+        %sin_val = math.sin %angle : f32
+
+        %x1 = tensor.extract %input[%i0, %i1, %i2, %i3] : tensor<?x?x?x?xf32>
+        %x0 = tensor.extract %input[%i0, %i1, %i2, %freq_idx] : tensor<?x?x?x?xf32>
+
+        // out = x0 * sin + x1 * cos
         %x0_sin = arith.mulf %x0, %sin_val : f32
         %x1_cos = arith.mulf %x1, %cos_val : f32
-        %rotated = arith.addf %x0_sin, %x1_cos : f32
-        scf.yield %rotated : f32
+        %r = arith.addf %x0_sin, %x1_cos : f32
+        scf.yield %r : f32
       }
 
       linalg.yield %result : f32
-    } -> tensor<?x?x?x?x2xf32>
-
-    // Collapse back to original shape.
-    %output = tensor.collapse_shape %rotated [[0], [1], [2], [3, 4]] : tensor<?x?x?x?x2xf32> into tensor<?x?x?x?xf32>
+    } -> tensor<?x?x?x?xf32>
 
     util.return %output : tensor<?x?x?x?xf32>
   }

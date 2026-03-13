@@ -1,0 +1,156 @@
+IREE LLM Execution Model: Three Layers of Dynamism
+====================================================
+
+An LLM generate loop has three kinds of dynamism. Each is handled by a
+different layer of the execution stack, creating a clean separation of
+concerns between scheduling, sequencing, and parallelism.
+
+
+Layer 1: PYTHON HOST — Scheduling
+───────────────────────────────────
+Handles: DATA-DEPENDENT dynamism (values unknown until computation completes)
+
+  - Token selection     (argmax on logits — decides next token)
+  - EOS detection       (controls loop termination)
+  - Position tracking   (pos += 1 each decode step)
+  - KV cache bookkeeping (block tables, context lengths)
+
+Key principle: "Whatever changes between invocations, pass it as input
+to the next MLIR function. The cut point is handled by Python."
+
+  ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+  │ prefill()│────►│ decode() │────►│ decode() │────►│ decode() │──► ...
+  │          │     │          │     │          │     │          │
+  │ tok[1,S] │     │ tok[1]   │     │ tok[1]   │     │ tok[1]   │
+  │ pos[1,S] │     │ pos[1]   │     │ pos[1]   │     │ pos[1]   │
+  │ cache    │     │ cache    │     │ cache    │     │ cache    │
+  └────┬─────┘     └────┬─────┘     └────┬─────┘     └────┬─────┘
+       │ logits         │ logits         │ logits         │ logits
+       ▼                ▼                ▼                ▼
+    argmax()         argmax()         argmax()         argmax()
+    next_tok ──────► next_tok ──────► next_tok ──────► EOS? stop.
+
+  Each arrow is a SEPARATE IREE invocation. Python resolves data-dependent
+  values (argmax, EOS) between invocations and passes them as concrete inputs.
+
+       │ each invocation
+       ▼
+
+Layer 2: IREE VM — Sequencing
+──────────────────────────────
+Handles: INPUT-DEPENDENT dynamism (shapes unknown at compile time,
+         known at invocation time from input tensor dimensions)
+
+  - tensor<?x?xf32> dims resolved from input shapes
+  - Layer count, head count, vocab size from hyperparameters
+  - All shapes known BEFORE first dispatch launches
+  - Memory pre-planned by compiler, allocated by VM before execution
+
+Within one invocation, the VM sequences dispatches:
+
+  embed ─► for layer in 0..N-1:
+             attn_norm ─► QKV proj ─► QK norm ─► RoPE ─► attention
+             ─► KV scatter ─► ffn_norm ─► MoE routing
+             ─► expert gather ─► expert FFN (gate/up/down)
+           end ─► final_norm ─► output proj ─► logits
+
+  Each operation above becomes one or more dispatches to the scheduler.
+
+       │ dispatches
+       ▼
+
+Layer 3: WORK-STEALING SCHEDULER — Parallelism
+────────────────────────────────────────────────
+Handles: COMPUTATIONAL parallelism (how to split work across cores)
+
+  Each dispatch is tiled into work items. Worker threads steal from
+  shared queues — no thread sits idle while work remains.
+
+  Example: matmul dispatch [M x N] tiled into [M/Tm x N/Tn] work items
+
+  ┌──────┬──────┬──────┬──────┬──────┬──────┬──────┬──────┐
+  │ tile │ tile │ tile │ tile │ tile │ tile │ tile │ tile │
+  │(0,0) │(0,1) │(0,2) │(0,3) │(1,0) │(1,1) │(1,2) │(1,3) │
+  └──┬───┴──┬───┴──┬───┴──┬───┴──┬───┴──┬───┴──┬───┴──┬───┘
+     ▼      ▼      ▼      ▼      ▼      ▼      ▼      ▼
+  ┌──────┬──────┬──────┬──────┬──────┬──────┬──────┬──────┐
+  │  T0  │  T1  │  T2  │  T3  │  T4  │  T5  │  T6  │  T7  │ ... TN
+  └──────┴──────┴──────┴──────┴──────┴──────┴──────┴──────┘
+
+  --task_topology_group_count = N  (typically = number of CPU cores)
+
+  The same scheduler serves ALL backends:
+    CPU  → threads steal tiles across cores
+    GPU  → workgroups map to SMs/CUs
+    NPU  → tiles map to compute units
+
+  The scheduler doesn't know or care that it's running attention vs MoE
+  vs a norm — it just sees tiles of work to distribute.
+
+
+MoE Expert Selection — No Dynamic Allocation
+──────────────────────────────────────────────
+Expert routing appears data-dependent ("which 8 of 64 experts?"), but
+IREE handles it without dynamic buffer sizes:
+
+  tokens [batch, seq, hidden]
+     │
+     ▼
+  router(tokens) @ gate_weight ──► scores [batch*seq, n_experts]
+     │
+     ▼
+  topk(scores, k) ──► expert_ids    [batch*seq, k]     ← data-dependent VALUES
+                       expert_weights [batch*seq, k]       but FIXED shape
+     │
+     ▼
+  gather(all_expert_weights, expert_ids)
+     │                  ──► W_selected [k*batch*seq, in, out]  ← still fixed shape
+     ▼
+  batch_matmul(tokens_expanded, W_selected)
+     │                  ──► results [k*batch*seq, out]
+     ▼
+  scatter + weighted_sum ──► output [batch, seq, hidden]
+
+  Shape is always [n_expert_used * n_tokens, ...]. The data-dependent
+  part (WHICH expert) is handled by index-based gather into weight
+  tensors, not by variable-sized buffer allocation. The scheduler sees
+  fixed-shape matmuls regardless of which experts were selected.
+
+
+The Money: Why Work-Stealing Over All Drivers
+──────────────────────────────────────────────
+The three-layer split means:
+
+  1. Python does ONLY the inherently serial work (token decisions)
+     — microseconds between invocations
+
+  2. The VM does ONLY sequencing (dependency ordering of dispatches)
+     — nanoseconds per dispatch submission
+
+  3. The scheduler does ALL the heavy lifting (actual FLOPS)
+     — milliseconds of parallel compute, fully utilizing hardware
+
+  The scheduler is the multiplier. A matmul that takes 10ms on one core
+  takes ~10ms/N on N cores with good tiling. The same applies to every
+  op in the pipeline: attention across heads, MoE across experts,
+  norms across the hidden dimension.
+
+  And because the scheduler is backend-agnostic, the same MLIR compiles
+  to CPU threads, GPU warps, or NPU tiles — the only thing that changes
+  is the HAL driver and the tiling strategy chosen by the compiler.
+
+
+Summary
+───────
+  ┌──────────────────┬──────────────────────────┬──────────────────┐
+  │ Layer            │ Dynamism handled         │ Time scale       │
+  ├──────────────────┼──────────────────────────┼──────────────────┤
+  │ Python host      │ Data-dependent           │ ~μs (scheduling) │
+  │                  │ (argmax, EOS, positions)  │                  │
+  ├──────────────────┼──────────────────────────┼──────────────────┤
+  │ IREE VM          │ Input-dependent          │ ~ns (sequencing) │
+  │                  │ (tensor dims from inputs) │                  │
+  ├──────────────────┼──────────────────────────┼──────────────────┤
+  │ Work-stealing    │ Computational            │ ~ms (parallel    │
+  │ scheduler        │ (tiling, distribution)   │      compute)    │
+  └──────────────────┴──────────────────────────┴──────────────────┘

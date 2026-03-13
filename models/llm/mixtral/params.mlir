@@ -382,4 +382,18 @@ module @model_params {
     util.return %dyn : tensor<?x?x?xf32>
   }
 
+  // --- QK norm weights (dummy — use_qk_norm=false for Mixtral) ---
+
+  util.func public @attn_q_norm_weight(%layer: i32) -> tensor<?xf32> {
+    %w = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.attn_q_norm.weight"> : tensor<4096xf32>
+    %dyn = tensor.cast %w : tensor<4096xf32> to tensor<?xf32>
+    util.return %dyn : tensor<?xf32>
+  }
+
+  util.func public @attn_k_norm_weight(%layer: i32) -> tensor<?xf32> {
+    %w = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.attn_k_norm.weight"> : tensor<1024xf32>
+    %dyn = tensor.cast %w : tensor<1024xf32> to tensor<?xf32>
+    util.return %dyn : tensor<?xf32>
+  }
+
 }

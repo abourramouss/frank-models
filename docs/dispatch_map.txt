@@ -1,0 +1,156 @@
+IREE Dispatch Map — OLMoE-1B-7B
+=================================
+
+Generated from: iree-compile --compile-to=flow
+Full IR saved at: docs/olmoe_flow.mlir
+
+Unique dispatch executables: 30 prefill + 16 decode = 46 total
+Dispatches per prefill layer iteration: ~30
+Dispatches per decode layer iteration: ~30
+Total per @prefill call (16 layers): ~483
+Total per @decode call (16 layers): ~483
+
+
+PREFILL — One Layer Dispatch Sequence
+======================================
+
+LLM Component              Dispatch Name                                   Shape Signature                  Dynamic?
+─────────────────────────  ──────────────────────────────────────────────── ──────────────────────────────── ────────
+
+── ATTENTION BLOCK ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+1. Attn RMS norm           prefill_dispatch_13  reduction_Dx2048             [D, 2048] → [D, 2048]           D = batch×S
+2. Q weight broadcast      prefill_dispatch_14  elementwise_broadcast_Dx4M   [4194304] → [D, 4194304]        D = batch
+3. K weight broadcast      prefill_dispatch_14  (reused)                     "                               "
+4. V weight broadcast      prefill_dispatch_14  (reused)                     "                               "
+5. Q projection            prefill_dispatch_17  batch_matmul_DxDx2048x2048   [D,D,2048] × [D,2048,2048]      D,D = batch,S
+6. K projection            prefill_dispatch_17  (reused)                     "                               "
+7. V projection            prefill_dispatch_17  (reused)                     "                               "
+8. Q norm (RMS)            prefill_dispatch_13  reduction_Dx2048 (reused)    [D, 2048]                       D = batch×S
+9. K norm (RMS)            prefill_dispatch_13  (reused)                     "                               "
+10. Q reshape+norm→heads   prefill_dispatch_22  elementwise_broadcast_D      [D] → [D]                       D = batch×S×2048
+11. K reshape+norm→heads   prefill_dispatch_22  (reused)                     "                               "
+12. RoPE freq base         prefill_dispatch_24  elementwise_broadcast_64     [64] (static!)                  no
+13. Q RoPE apply           prefill_dispatch_25  elementwise_broadcast_D      [D, S, 16, 128] positions       D = batch×S×2048
+14. K RoPE apply           prefill_dispatch_25  (reused)                     "                               "
+15. V reshape              prefill_dispatch_27  elementwise_broadcast_D      [D] reshape                     D = batch×S×2048
+16. ★ ATTENTION (fused)    prefill_dispatch_28  attention_DxDx128xDx128      QK^T[D,S,S] + softmax + AV      D = batch×heads
+                                                                             ← S×S QUADRATIC
+17. Attn output reshape    prefill_dispatch_29  elementwise_broadcast_D      [D] reshape                     D = batch×S×2048
+18. O weight broadcast     prefill_dispatch_14  (reused)                     "                               "
+19. O proj + residual      prefill_dispatch_31  batch_matmul_DxDx2048x2048   [D,D,2048] × [D,2048,2048]      D,D = batch,S
+                                                                             ← residual add FUSED into this
+
+── KV CACHE SCATTER (inner loop over seq positions) ───────────────────────────────────────────────────────────────
+
+20. K extract+RoPE→entry   prefill_dispatch_48  elementwise_broadcast_2048   → [2048] per position           per-token loop
+21. K cache scatter        prefill_dispatch_49  slow_memcpy                  scatter 1 entry to paged block   ⚠️ slow_memcpy!
+22. V extract→entry        prefill_dispatch_50  elementwise_broadcast_2048   → [2048] per position           per-token loop
+23. V cache scatter        prefill_dispatch_49  (reused)                     scatter 1 entry to paged block   ⚠️ slow_memcpy!
+    └── Runs S times (once per token position) — S dispatches each!
+
+── MoE FFN BLOCK ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+24. FFN RMS norm           prefill_dispatch_13  reduction_Dx2048 (reused)    [D, 2048]                       D = batch×S
+25. Router matmul          prefill_dispatch_33  matmul_64xDx2048             [64,D] × [D,2048]               D = batch×S
+26. Router softmax         prefill_dispatch_34  softmax_64xD                 [64, D]                         D = batch×S
+27. Top-k selection        prefill_dispatch_35  topk_64xD                    [64, D] → ids[8,D], w[8,D]      D = batch×S
+28. Gate wt transpose      prefill_dispatch_36  transpose_2097152x64         [2097152, 64] → [64, 2097152]   static!
+29. ★ Gate wt gather       prefill_dispatch_37  gather_8xDx1024x2048         [64,...] → [8,D,1024,2048]      D = batch×S
+                                                                             ← 8×S expert slices gathered
+30. Input broadcast        prefill_dispatch_38  elementwise_broadcast_8xD    replicate input for 8 experts    D = batch×S×2048
+31. ★ Gate matmul          prefill_dispatch_39  batch_matmul_Dx1024x1x2048   [D,1024,2048] × [D,2048,1]      D = 8×batch×S
+32. Up wt transpose        prefill_dispatch_36  (reused)                     "                               static
+33. ★ Up wt gather         prefill_dispatch_37  (reused)                     "                               D = batch×S
+34. ★ Up matmul            prefill_dispatch_39  (reused)                     "                               D = 8×batch×S
+35. SwiGLU                 prefill_dispatch_45  elementwise_D                [D] silu(gate) × up              D = 8×S×1024
+36. Down wt transpose      prefill_dispatch_36  (reused)                     "                               static
+37. ★ Down wt gather       prefill_dispatch_44  gather_8xDx2048x1024         [64,...] → [8,D,2048,1024]      D = batch×S
+38. ★ Down matmul          prefill_dispatch_46  batch_matmul_Dx2048x1x1024   [D,2048,1024] × [D,1024,1]      D = 8×batch×S
+39. Expert weighted sum    prefill_dispatch_47  matvec_like_Dx2048x8         [8,D,2048] × [8,D] → [D,2048]   D = batch×S
+
+── POST-LAYERS ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+40. Final RMS norm         prefill_dispatch_13  reduction_Dx2048 (reused)    [D, 2048]                       D = batch×S
+41. ★ Output projection    prefill_dispatch_53  matmul_Dx50304x2048          [D,2048] × [2048,50304]         D = batch×S
+                                                                             ← 50304 vocab, BIG matmul
+
+
+DECODE — One Layer Dispatch Sequence
+=====================================
+
+LLM Component              Dispatch Name                                   Shape Signature                  Dynamic?
+─────────────────────────  ──────────────────────────────────────────────── ──────────────────────────────── ────────
+
+── ATTENTION BLOCK ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+1. Attn norm + reshape     decode_dispatch_13   elementwise_Dx2048           [D, 2048] fused norm+reshape     D = batch (=1)
+2. K cache gather          decode_dispatch_14   elementwise_broadcast_DxD    paged block → dense K            D = blocks, ctx
+3. V cache gather          decode_dispatch_14   (reused)                     paged block → dense V            "
+4. Q projection            decode_dispatch_16   matmul_Dx2048x2048           [D,2048] × [2048,2048]          D = batch (GEMV!)
+5. K projection            decode_dispatch_16   (reused)                     "                               "
+6. V projection            decode_dispatch_16   (reused)                     "                               "
+7. Q norm                  prefill_dispatch_13  reduction_Dx2048 (shared!)   [D, 2048]                       D = batch
+8. K norm                  prefill_dispatch_13  (shared)                     "                               "
+9. Q reshape               decode_dispatch_21   elementwise_broadcast_D      [D]                             D = batch×2048
+10. K reshape              decode_dispatch_21   (reused)                     "                               "
+11. V reshape              decode_dispatch_21   (reused)                     "                               "
+12. Q RoPE apply           decode_dispatch_25   elementwise_broadcast_D      [D]                             D = batch×2048
+13. K RoPE apply           decode_dispatch_25   (reused)                     "                               "
+14. KV concat (K old+new)  decode_dispatch_27   slow_memcpy                  [blocks,ctx,16,128] concat       ⚠️ slow_memcpy
+15. KV insert (K new)      decode_dispatch_28   slow_memcpy                  insert new K entry               ⚠️ slow_memcpy
+16. KV concat (V old+new)  decode_dispatch_27   (reused)                     "                               "
+17. KV insert (V new)      decode_dispatch_28   (reused)                     "                               "
+18. K broadcast for GQA    decode_dispatch_31   elementwise_DxDxDxDx128      repeat K for head groups         multi-D dynamic
+19. V broadcast for GQA    decode_dispatch_32   elementwise_DxDxDx128xD      repeat V for head groups         "
+20. ★ ATTENTION (fused)    decode_dispatch_33   attention_Dx128xDx128        q[D,128] × K[D,ctx,128]          D×ctx_len
+                                                                             ← ctx_len GROWS each step
+21. Attn output reshape    decode_dispatch_34   elementwise_broadcast_D      [D]                             D = batch×2048
+22. O proj + residual      decode_dispatch_35   matmul_Dx2048x2048           [D,2048] × [2048,2048]          D = batch
+
+── KV CACHE SCATTER (inner loop over batch) ───────────────────────────────────────────────────────────────────────
+
+23. K cache scatter        decode_dispatch_36   slow_memcpy                  write K entry to paged block     ⚠️ slow_memcpy
+24. V cache scatter        decode_dispatch_36   (reused)                     write V entry to paged block     ⚠️ slow_memcpy
+
+── MoE FFN BLOCK (shares most dispatches with prefill!) ──────────────────────────────────────────────────────────
+
+25. FFN RMS norm           prefill_dispatch_13  (shared from prefill!)       [D, 2048]                       D = batch
+26. Router                 prefill_dispatch_33  matmul_64xDx2048 (shared!)   [64,D] × [D,2048]               D = batch
+27. Softmax                prefill_dispatch_34  (shared!)                    [64, D]                         D = batch
+28. Top-k                  prefill_dispatch_35  (shared!)                    [64, D] → ids[8,D], w[8,D]      D = batch
+29-38. Expert FFN          (same dispatches as prefill: 36,37,39,44,45,46)   but D = batch (=1), not S
+39. Expert weighted sum    decode_dispatch_53   matvec_like_Dx2048x8         [8,D,2048] × [8,D]              D = batch
+
+── POST-LAYERS ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+40. Final norm + reshape   decode_dispatch_13   (reused)                     [D, 2048]                       D = batch
+41. ★ Output projection    decode_dispatch_55   matmul_Dx50304x2048          [D,2048] × [2048,50304]         D = batch
+
+
+KEY OBSERVATIONS
+=================
+
+1. DISPATCH REUSE: Compiler shares 8+ dispatch kernels between prefill and decode
+   (prefill_dispatch_13, 24, 33, 34, 35, 36, 37, 39, 44, 45, 46 all used in decode too)
+
+2. "D" MEANS DYNAMIC: Every dispatch with "D" in its shape resolves that dim at
+   invocation time. In prefill D typically = batch×S, in decode D typically = batch (=1).
+
+3. slow_memcpy: KV cache scatter/gather uses "slow_memcpy" dispatches — NOT optimized
+   kernels. These are element-by-element copies through the paged block structure.
+   Prefill scatters S entries (S dispatch calls in a loop!), decode scatters 1.
+
+4. ATTENTION IS FUSED: QK^T + softmax + AV is ONE dispatch (dispatch_28 for prefill,
+   dispatch_33 for decode). BUT it materializes the full S×S attention matrix — no
+   flash attention tiling.
+
+5. MoE SCALING: Expert gather creates [8×D, 1024, 2048] gathered weights.
+   At S=1024: 8192 × 1024 × 2048 × 4 bytes = ~67 GB of gathered weight data per layer.
+   The transpose_2097152x64 dispatch (static, no D) runs 3× per layer for gate/up/down.
+
+6. LAYER LOOP: The compiler keeps scf.for over 16 layers (not unrolled), but DOES
+   unroll parameter selection into pairs of 2 using i1 flags (even/odd layer trick).
+
+7. RESIDUAL FUSION: O projection (dispatch_31 prefill, dispatch_35 decode) has the
+   residual add FUSED into the matmul dispatch. Same for decode norm (dispatch_13).

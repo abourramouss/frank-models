@@ -189,6 +189,36 @@ module @model_params {
     util.return %dyn : tensor<?xf32>
   }
 
+  // --- QK norm weights (dummy — use_qk_norm=false for toy model) ---
+
+  util.func public @attn_q_norm_weight(%layer: i32) -> tensor<?xf32> {
+    %c0 = arith.constant 0 : i32
+    %is_layer0 = arith.cmpi eq, %layer, %c0 : i32
+    %w = scf.if %is_layer0 -> (tensor<64xf32>) {
+      %w0 = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.attn_q_norm.weight"> : tensor<64xf32>
+      scf.yield %w0 : tensor<64xf32>
+    } else {
+      %w1 = flow.tensor.constant #flow.parameter.named<"model"::"blk.1.attn_q_norm.weight"> : tensor<64xf32>
+      scf.yield %w1 : tensor<64xf32>
+    }
+    %dyn = tensor.cast %w : tensor<64xf32> to tensor<?xf32>
+    util.return %dyn : tensor<?xf32>
+  }
+
+  util.func public @attn_k_norm_weight(%layer: i32) -> tensor<?xf32> {
+    %c0 = arith.constant 0 : i32
+    %is_layer0 = arith.cmpi eq, %layer, %c0 : i32
+    %w = scf.if %is_layer0 -> (tensor<32xf32>) {
+      %w0 = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.attn_k_norm.weight"> : tensor<32xf32>
+      scf.yield %w0 : tensor<32xf32>
+    } else {
+      %w1 = flow.tensor.constant #flow.parameter.named<"model"::"blk.1.attn_k_norm.weight"> : tensor<32xf32>
+      scf.yield %w1 : tensor<32xf32>
+    }
+    %dyn = tensor.cast %w : tensor<32xf32> to tensor<?xf32>
+    util.return %dyn : tensor<?xf32>
+  }
+
   // --- MoE weights ---
 
   util.func public @ffn_gate_inp_weight(%layer: i32) -> tensor<?x?xf32> {
