@@ -226,59 +226,20 @@ module @attention_block_prefill_components {
     }
 
     // Reshape for multi-head: [batch, seq_len, n_embd] -> [batch, seq_len, n_head, head_dim]
-    // Use linalg.generic + linalg.index instead of tensor.expand_shape to avoid an IREE
-    // GlobalOpt bug: when n_head and head_dim are constant-folded to static values, IREE
-    // produces expand_shape with static_output_shape = array<i64> (empty) → verifier crash.
     %head_dim = arith.divsi %n_embd, %n_head : index
     %head_dim_kv = arith.divsi %n_embd_kv, %n_head_kv : index
 
-    %q_reshaped_init = tensor.empty(%batch, %seq_len, %n_head, %head_dim) : tensor<?x?x?x?xf16>
-    %q_reshaped = linalg.generic {
-      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
-      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
-    } outs(%q_reshaped_init : tensor<?x?x?x?xf16>) {
-    ^bb0(%out: f16):
-      %i0 = linalg.index 0 : index
-      %i1 = linalg.index 1 : index
-      %i2 = linalg.index 2 : index
-      %i3 = linalg.index 3 : index
-      %flat = arith.muli %i2, %head_dim : index
-      %flat_idx = arith.addi %flat, %i3 : index
-      %val = tensor.extract %q_normed[%i0, %i1, %flat_idx] : tensor<?x?x?xf16>
-      linalg.yield %val : f16
-    } -> tensor<?x?x?x?xf16>
+    %q_reshaped = tensor.expand_shape %q_normed [[0], [1], [2, 3]]
+        output_shape [%batch, %seq_len, %n_head, %head_dim]
+        : tensor<?x?x?xf16> into tensor<?x?x?x?xf16>
 
-    %k_reshaped_init = tensor.empty(%batch, %seq_len, %n_head_kv, %head_dim_kv) : tensor<?x?x?x?xf16>
-    %k_reshaped = linalg.generic {
-      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
-      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
-    } outs(%k_reshaped_init : tensor<?x?x?x?xf16>) {
-    ^bb0(%out: f16):
-      %i0 = linalg.index 0 : index
-      %i1 = linalg.index 1 : index
-      %i2 = linalg.index 2 : index
-      %i3 = linalg.index 3 : index
-      %flat = arith.muli %i2, %head_dim_kv : index
-      %flat_idx = arith.addi %flat, %i3 : index
-      %val = tensor.extract %k_normed[%i0, %i1, %flat_idx] : tensor<?x?x?xf16>
-      linalg.yield %val : f16
-    } -> tensor<?x?x?x?xf16>
+    %k_reshaped = tensor.expand_shape %k_normed [[0], [1], [2, 3]]
+        output_shape [%batch, %seq_len, %n_head_kv, %head_dim_kv]
+        : tensor<?x?x?xf16> into tensor<?x?x?x?xf16>
 
-    %v_reshaped_init = tensor.empty(%batch, %seq_len, %n_head_kv, %head_dim_kv) : tensor<?x?x?x?xf16>
-    %v_reshaped = linalg.generic {
-      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
-      iterator_types = ["parallel", "parallel", "parallel", "parallel"]
-    } outs(%v_reshaped_init : tensor<?x?x?x?xf16>) {
-    ^bb0(%out: f16):
-      %i0 = linalg.index 0 : index
-      %i1 = linalg.index 1 : index
-      %i2 = linalg.index 2 : index
-      %i3 = linalg.index 3 : index
-      %flat = arith.muli %i2, %head_dim_kv : index
-      %flat_idx = arith.addi %flat, %i3 : index
-      %val = tensor.extract %v_final[%i0, %i1, %flat_idx] : tensor<?x?x?xf16>
-      linalg.yield %val : f16
-    } -> tensor<?x?x?x?xf16>
+    %v_reshaped = tensor.expand_shape %v_final [[0], [1], [2, 3]]
+        output_shape [%batch, %seq_len, %n_head_kv, %head_dim_kv]
+        : tensor<?x?x?xf16> into tensor<?x?x?x?xf16>
 
     // Apply RoPE to query and key.
     // K with RoPE will be stored in cache.

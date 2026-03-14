@@ -146,21 +146,22 @@ module @attention_components {
       iree_linalg_ext.yield %arg0 : f32
     } -> tensor<?x?x?xf16>
 
-    // Reshape [batch*n_head, seq, head_dim] -> [batch, seq, n_head, head_dim]
+    // Reshape [batch*n_head, seq, head_dim] -> [batch, n_head, seq, head_dim]
+    %output_4d = tensor.expand_shape %output_3d [[0, 1], [2], [3]]
+        output_shape [%batch, %n_head, %seq_len, %head_dim]
+        : tensor<?x?x?xf16> into tensor<?x?x?x?xf16>
+
+    // Transpose [batch, n_head, seq, head_dim] -> [batch, seq, n_head, head_dim]
     %output_init = tensor.empty(%batch, %seq_len, %n_head, %head_dim) : tensor<?x?x?x?xf16>
     %output = linalg.generic {
-      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
+      indexing_maps = [
+        affine_map<(d0, d1, d2, d3) -> (d0, d2, d1, d3)>,
+        affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
+      ],
       iterator_types = ["parallel", "parallel", "parallel", "parallel"]
-    } outs(%output_init : tensor<?x?x?x?xf16>) {
-    ^bb0(%out: f16):
-      %i0 = linalg.index 0 : index
-      %i1 = linalg.index 1 : index
-      %i2 = linalg.index 2 : index
-      %i3 = linalg.index 3 : index
-      %flat_head = arith.muli %i0, %n_head : index
-      %flat_idx = arith.addi %flat_head, %i2 : index
-      %val = tensor.extract %output_3d[%flat_idx, %i1, %i3] : tensor<?x?x?xf16>
-      linalg.yield %val : f16
+    } ins(%output_4d : tensor<?x?x?x?xf16>) outs(%output_init : tensor<?x?x?x?xf16>) {
+    ^bb0(%in: f16, %out: f16):
+      linalg.yield %in : f16
     } -> tensor<?x?x?x?xf16>
 
     util.return %output : tensor<?x?x?x?xf16>
