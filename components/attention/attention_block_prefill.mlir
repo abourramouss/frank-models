@@ -13,9 +13,7 @@
 // Logical shapes:
 //   input:     [batch, seq_len, n_embd]      - input hidden states
 //   positions: [batch, seq_len]              - position indices for RoPE
-//   wq:        [n_embd, n_embd]              - query projection weights
-//   wk:        [n_embd, n_kv_embd]           - key projection (n_kv_embd = n_head_kv * head_dim)
-//   wv:        [n_embd, n_kv_embd]           - value projection
+//   wqkv:      [n_embd, n_embd + 2*n_embd_kv] - fused QKV projection weight
 //   wo:        [n_embd, n_embd]              - output projection
 //   bq/bk/bv/bo: [n_embd] or [n_kv_embd]     - optional biases
 //
@@ -50,9 +48,7 @@ module @attention_block_prefill_components {
   util.func public @attention_block_prefill(
       %input: tensor<?x?x?xf16>,        // [batch, seq_len, n_embd]
       %positions: tensor<?x?xi64>,       // [batch, seq_len]
-      %wq: tensor<?x?xf16>,              // [n_embd, n_embd]
-      %wk: tensor<?x?xf16>,              // [n_embd, n_embd_kv]
-      %wv: tensor<?x?xf16>,              // [n_embd, n_embd_kv]
+      %wqkv: tensor<?x?xf16>,            // [n_embd, n_embd + 2*n_embd_kv] (fused QKV)
       %wo: tensor<?x?xf16>,              // [n_embd, n_embd]
       %bq: tensor<?xf16>,                // [n_embd] - may be dummy if not used
       %bk: tensor<?xf16>,                // [n_embd_kv]
@@ -73,74 +69,51 @@ module @attention_block_prefill_components {
         tensor<?x?x?x?xf16>) {           // v_out: [batch, seq_len, n_head_kv, head_dim]
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
     %batch = tensor.dim %input, %c0 : tensor<?x?x?xf16>
     %seq_len = tensor.dim %input, %c1 : tensor<?x?x?xf16>
 
-    // Get dimensions from weights.
-    %n_embd_kv = tensor.dim %wk, %c1 : tensor<?x?xf16>
-    %wq_k = tensor.dim %wq, %c0 : tensor<?x?xf16>
-    %wk_k = tensor.dim %wk, %c0 : tensor<?x?xf16>
-    %wv_k = tensor.dim %wv, %c0 : tensor<?x?xf16>
+    // Get dimensions from fused QKV weight.
+    // wqkv shape: [n_embd, qkv_out_dim] where qkv_out_dim = n_embd + 2*n_embd_kv
+    %qkv_out_dim = tensor.dim %wqkv, %c1 : tensor<?x?xf16>
+    // n_embd_kv = (qkv_out_dim - n_embd) / 2
+    %kv_total = arith.subi %qkv_out_dim, %n_embd : index
+    %n_embd_kv = arith.divsi %kv_total, %c2 : index
+    %wqkv_k = tensor.dim %wqkv, %c0 : tensor<?x?xf16>
     %wo_k = tensor.dim %wo, %c0 : tensor<?x?xf16>
 
-    // Broadcast weights from [K, N] to [batch, K, N] for batch_matmul.
-    // Q weights: [n_embd, n_embd] -> [batch, n_embd, n_embd]
-    %wq_3d_init = tensor.empty(%batch, %wq_k, %n_embd) : tensor<?x?x?xf16>
-    %wq_3d = linalg.generic {
+    // Broadcast fused QKV weight from [K, N] to [batch, K, N] for batch_matmul.
+    // [n_embd, qkv_out_dim] -> [batch, n_embd, qkv_out_dim]
+    %wqkv_3d_init = tensor.empty(%batch, %wqkv_k, %qkv_out_dim) : tensor<?x?x?xf16>
+    %wqkv_3d = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1, d2) -> (d1, d2)>,     // input: [K, N]
         affine_map<(d0, d1, d2) -> (d0, d1, d2)>  // output: [batch, K, N]
       ],
       iterator_types = ["parallel", "parallel", "parallel"]
-    } ins(%wq : tensor<?x?xf16>) outs(%wq_3d_init : tensor<?x?x?xf16>) {
+    } ins(%wqkv : tensor<?x?xf16>) outs(%wqkv_3d_init : tensor<?x?x?xf16>) {
     ^bb0(%in: f16, %out: f16):
       linalg.yield %in : f16
     } -> tensor<?x?x?xf16>
 
-    // K weights: [n_embd, n_embd_kv] -> [batch, n_embd, n_embd_kv]
-    %wk_3d_init = tensor.empty(%batch, %wk_k, %n_embd_kv) : tensor<?x?x?xf16>
-    %wk_3d = linalg.generic {
-      indexing_maps = [
-        affine_map<(d0, d1, d2) -> (d1, d2)>,
-        affine_map<(d0, d1, d2) -> (d0, d1, d2)>
-      ],
-      iterator_types = ["parallel", "parallel", "parallel"]
-    } ins(%wk : tensor<?x?xf16>) outs(%wk_3d_init : tensor<?x?x?xf16>) {
-    ^bb0(%in: f16, %out: f16):
-      linalg.yield %in : f16
-    } -> tensor<?x?x?xf16>
-
-    // V weights: [n_embd, n_embd_kv] -> [batch, n_embd, n_embd_kv]
-    %wv_3d_init = tensor.empty(%batch, %wv_k, %n_embd_kv) : tensor<?x?x?xf16>
-    %wv_3d = linalg.generic {
-      indexing_maps = [
-        affine_map<(d0, d1, d2) -> (d1, d2)>,
-        affine_map<(d0, d1, d2) -> (d0, d1, d2)>
-      ],
-      iterator_types = ["parallel", "parallel", "parallel"]
-    } ins(%wv : tensor<?x?xf16>) outs(%wv_3d_init : tensor<?x?x?xf16>) {
-    ^bb0(%in: f16, %out: f16):
-      linalg.yield %in : f16
-    } -> tensor<?x?x?xf16>
-
-    // QKV projections: [batch, seq, n_embd] @ [batch, n_embd, n_out] -> [batch, seq, n_out]
+    // Fused QKV projection: [batch, seq, n_embd] @ [batch, n_embd, qkv_out_dim] -> [batch, seq, qkv_out_dim]
     %cst_zero = arith.constant 0.0 : f16
-    %q_proj_init = tensor.empty(%batch, %seq_len, %n_embd) : tensor<?x?x?xf16>
-    %q_proj_zero = linalg.fill ins(%cst_zero : f16) outs(%q_proj_init : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
-    %q_proj = linalg.batch_matmul ins(%input, %wq_3d : tensor<?x?x?xf16>, tensor<?x?x?xf16>)
-        outs(%q_proj_zero : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
+    %qkv_proj_init = tensor.empty(%batch, %seq_len, %qkv_out_dim) : tensor<?x?x?xf16>
+    %qkv_proj_zero = linalg.fill ins(%cst_zero : f16) outs(%qkv_proj_init : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
+    %qkv_proj = linalg.batch_matmul ins(%input, %wqkv_3d : tensor<?x?x?xf16>, tensor<?x?x?xf16>)
+        outs(%qkv_proj_zero : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
 
-    %k_proj_init = tensor.empty(%batch, %seq_len, %n_embd_kv) : tensor<?x?x?xf16>
-    %k_proj_zero = linalg.fill ins(%cst_zero : f16) outs(%k_proj_init : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
-    %k_proj = linalg.batch_matmul ins(%input, %wk_3d : tensor<?x?x?xf16>, tensor<?x?x?xf16>)
-        outs(%k_proj_zero : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
-
-    %v_proj_init = tensor.empty(%batch, %seq_len, %n_embd_kv) : tensor<?x?x?xf16>
-    %v_proj_zero = linalg.fill ins(%cst_zero : f16) outs(%v_proj_init : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
-    %v_proj = linalg.batch_matmul ins(%input, %wv_3d : tensor<?x?x?xf16>, tensor<?x?x?xf16>)
-        outs(%v_proj_zero : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
+    // Split fused QKV output: [batch, seq, qkv_out_dim] -> Q[batch, seq, n_embd], K[batch, seq, n_embd_kv], V[batch, seq, n_embd_kv]
+    %q_proj = tensor.extract_slice %qkv_proj[0, 0, 0] [%batch, %seq_len, %n_embd] [1, 1, 1]
+        : tensor<?x?x?xf16> to tensor<?x?x?xf16>
+    %k_proj = tensor.extract_slice %qkv_proj[0, 0, %n_embd] [%batch, %seq_len, %n_embd_kv] [1, 1, 1]
+        : tensor<?x?x?xf16> to tensor<?x?x?xf16>
+    %v_offset = arith.addi %n_embd, %n_embd_kv : index
+    %v_proj = tensor.extract_slice %qkv_proj[0, 0, %v_offset] [%batch, %seq_len, %n_embd_kv] [1, 1, 1]
+        : tensor<?x?x?xf16> to tensor<?x?x?xf16>
 
     // Conditionally add biases if enabled.
+    %q_bias_out_init = tensor.empty(%batch, %seq_len, %n_embd) : tensor<?x?x?xf16>
     %q_final = scf.if %use_bias -> (tensor<?x?x?xf16>) {
       %q_biased = linalg.generic {
         indexing_maps = [
@@ -149,7 +122,7 @@ module @attention_block_prefill_components {
           affine_map<(d0, d1, d2) -> (d0, d1, d2)>   // out
         ],
         iterator_types = ["parallel", "parallel", "parallel"]
-      } ins(%q_proj, %bq : tensor<?x?x?xf16>, tensor<?xf16>) outs(%q_proj_init : tensor<?x?x?xf16>) {
+      } ins(%q_proj, %bq : tensor<?x?x?xf16>, tensor<?xf16>) outs(%q_bias_out_init : tensor<?x?x?xf16>) {
       ^bb0(%proj: f16, %bias: f16, %out: f16):
         %sum = arith.addf %proj, %bias : f16
         linalg.yield %sum : f16
@@ -159,6 +132,7 @@ module @attention_block_prefill_components {
       scf.yield %q_proj : tensor<?x?x?xf16>
     }
 
+    %k_bias_out_init = tensor.empty(%batch, %seq_len, %n_embd_kv) : tensor<?x?x?xf16>
     %k_final = scf.if %use_bias -> (tensor<?x?x?xf16>) {
       %k_biased = linalg.generic {
         indexing_maps = [
@@ -167,7 +141,7 @@ module @attention_block_prefill_components {
           affine_map<(d0, d1, d2) -> (d0, d1, d2)>
         ],
         iterator_types = ["parallel", "parallel", "parallel"]
-      } ins(%k_proj, %bk : tensor<?x?x?xf16>, tensor<?xf16>) outs(%k_proj_init : tensor<?x?x?xf16>) {
+      } ins(%k_proj, %bk : tensor<?x?x?xf16>, tensor<?xf16>) outs(%k_bias_out_init : tensor<?x?x?xf16>) {
       ^bb0(%proj: f16, %bias: f16, %out: f16):
         %sum = arith.addf %proj, %bias : f16
         linalg.yield %sum : f16
@@ -177,6 +151,7 @@ module @attention_block_prefill_components {
       scf.yield %k_proj : tensor<?x?x?xf16>
     }
 
+    %v_bias_out_init = tensor.empty(%batch, %seq_len, %n_embd_kv) : tensor<?x?x?xf16>
     %v_final = scf.if %use_bias -> (tensor<?x?x?xf16>) {
       %v_biased = linalg.generic {
         indexing_maps = [
@@ -185,7 +160,7 @@ module @attention_block_prefill_components {
           affine_map<(d0, d1, d2) -> (d0, d1, d2)>
         ],
         iterator_types = ["parallel", "parallel", "parallel"]
-      } ins(%v_proj, %bv : tensor<?x?x?xf16>, tensor<?xf16>) outs(%v_proj_init : tensor<?x?x?xf16>) {
+      } ins(%v_proj, %bv : tensor<?x?x?xf16>, tensor<?xf16>) outs(%v_bias_out_init : tensor<?x?x?xf16>) {
       ^bb0(%proj: f16, %bias: f16, %out: f16):
         %sum = arith.addf %proj, %bias : f16
         linalg.yield %sum : f16
