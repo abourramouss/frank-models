@@ -123,81 +123,17 @@ module @attention_block_decode_components {
     // Conditionally add biases if enabled.
     // bias_add: out[b, i] = proj[b, i] + bias[i]
     %q_bias_out_init = tensor.empty(%batch, %n_embd) : tensor<?x?xf16>
-    %q_final = scf.if %use_bias -> (tensor<?x?xf16>) {
-      %q_biased = linalg.generic {
-        indexing_maps = [
-          affine_map<(d0, d1) -> (d0, d1)>,  // proj: [batch, n_embd]
-          affine_map<(d0, d1) -> (d1)>,       // bias: [n_embd]
-          affine_map<(d0, d1) -> (d0, d1)>   // out: [batch, n_embd]
-        ],
-        iterator_types = ["parallel", "parallel"]
-      } ins(%q_proj, %bq : tensor<?x?xf16>, tensor<?xf16>) outs(%q_bias_out_init : tensor<?x?xf16>) {
-      ^bb0(%proj: f16, %bias: f16, %out: f16):
-        %sum = arith.addf %proj, %bias : f16
-        linalg.yield %sum : f16
-      } -> tensor<?x?xf16>
-      scf.yield %q_biased : tensor<?x?xf16>
-    } else {
-      scf.yield %q_proj : tensor<?x?xf16>
-    }
+    // OLMoE: no bias (use_bias=false), always QK norm (use_qk_norm=true).
+    // Removing scf.if conditionals to eliminate fusion barriers.
 
-    %k_bias_out_init = tensor.empty(%batch, %n_embd_kv) : tensor<?x?xf16>
-    %k_final = scf.if %use_bias -> (tensor<?x?xf16>) {
-      %k_biased = linalg.generic {
-        indexing_maps = [
-          affine_map<(d0, d1) -> (d0, d1)>,
-          affine_map<(d0, d1) -> (d1)>,
-          affine_map<(d0, d1) -> (d0, d1)>
-        ],
-        iterator_types = ["parallel", "parallel"]
-      } ins(%k_proj, %bk : tensor<?x?xf16>, tensor<?xf16>) outs(%k_bias_out_init : tensor<?x?xf16>) {
-      ^bb0(%proj: f16, %bias: f16, %out: f16):
-        %sum = arith.addf %proj, %bias : f16
-        linalg.yield %sum : f16
-      } -> tensor<?x?xf16>
-      scf.yield %k_biased : tensor<?x?xf16>
-    } else {
-      scf.yield %k_proj : tensor<?x?xf16>
-    }
+    // QK norm directly on projections (no bias add).
+    %q_normed = util.call @rms_norm_components.rms_norm_linalg(
+        %q_proj, %q_norm_weight, %rms_eps)
+        : (tensor<?x?xf16>, tensor<?xf16>, f32) -> tensor<?x?xf16>
 
-    %v_bias_out_init = tensor.empty(%batch, %n_embd_kv) : tensor<?x?xf16>
-    %v_final = scf.if %use_bias -> (tensor<?x?xf16>) {
-      %v_biased = linalg.generic {
-        indexing_maps = [
-          affine_map<(d0, d1) -> (d0, d1)>,
-          affine_map<(d0, d1) -> (d1)>,
-          affine_map<(d0, d1) -> (d0, d1)>
-        ],
-        iterator_types = ["parallel", "parallel"]
-      } ins(%v_proj, %bv : tensor<?x?xf16>, tensor<?xf16>) outs(%v_bias_out_init : tensor<?x?xf16>) {
-      ^bb0(%proj: f16, %bias: f16, %out: f16):
-        %sum = arith.addf %proj, %bias : f16
-        linalg.yield %sum : f16
-      } -> tensor<?x?xf16>
-      scf.yield %v_biased : tensor<?x?xf16>
-    } else {
-      scf.yield %v_proj : tensor<?x?xf16>
-    }
-
-    // Conditionally apply QK norm (RMS norm on flat Q/K projections before reshape).
-    // Applied to [batch, n_embd] (Q) or [batch, n_embd_kv] (K).
-    %q_normed = scf.if %use_qk_norm -> (tensor<?x?xf16>) {
-      %q_normed_2d = util.call @rms_norm_components.rms_norm_linalg(
-          %q_final, %q_norm_weight, %rms_eps)
-          : (tensor<?x?xf16>, tensor<?xf16>, f32) -> tensor<?x?xf16>
-      scf.yield %q_normed_2d : tensor<?x?xf16>
-    } else {
-      scf.yield %q_final : tensor<?x?xf16>
-    }
-
-    %k_normed = scf.if %use_qk_norm -> (tensor<?x?xf16>) {
-      %k_normed_2d = util.call @rms_norm_components.rms_norm_linalg(
-          %k_final, %k_norm_weight, %rms_eps)
-          : (tensor<?x?xf16>, tensor<?xf16>, f32) -> tensor<?x?xf16>
-      scf.yield %k_normed_2d : tensor<?x?xf16>
-    } else {
-      scf.yield %k_final : tensor<?x?xf16>
-    }
+    %k_normed = util.call @rms_norm_components.rms_norm_linalg(
+        %k_proj, %k_norm_weight, %rms_eps)
+        : (tensor<?x?xf16>, tensor<?xf16>, f32) -> tensor<?x?xf16>
 
     // Reshape for multi-head: [batch, n_embd] -> [batch, 1, n_head, head_dim]
     // Two expand_shapes: [batch, n_embd] -> [batch, n_head, head_dim] -> [batch, 1, n_head, head_dim]
@@ -215,7 +151,7 @@ module @attention_block_decode_components {
         output_shape [%batch, %seq_len_1, %n_head_kv, %head_dim_kv]
         : tensor<?x?x?xf16> into tensor<?x?x?x?xf16>
 
-    %v_reshaped_3d = tensor.expand_shape %v_final [[0], [1, 2]]
+    %v_reshaped_3d = tensor.expand_shape %v_proj [[0], [1, 2]]
         output_shape [%batch, %n_head_kv, %head_dim_kv]
         : tensor<?x?xf16> into tensor<?x?x?xf16>
 
@@ -257,30 +193,13 @@ module @attention_block_decode_components {
     %output_proj = linalg.matmul ins(%attn_flat, %wo : tensor<?x?xf16>, tensor<?x?xf16>)
         outs(%output_proj_zero : tensor<?x?xf16>) -> tensor<?x?xf16>
 
-    // Conditionally add output bias.
-    %output = scf.if %use_bias -> (tensor<?x?xf16>) {
-      %output_biased = linalg.generic {
-        indexing_maps = [
-          affine_map<(d0, d1) -> (d0, d1)>,
-          affine_map<(d0, d1) -> (d1)>,
-          affine_map<(d0, d1) -> (d0, d1)>
-        ],
-        iterator_types = ["parallel", "parallel"]
-      } ins(%output_proj, %bo : tensor<?x?xf16>, tensor<?xf16>) outs(%output_proj_init : tensor<?x?xf16>) {
-      ^bb0(%proj: f16, %bias: f16, %out: f16):
-        %sum = arith.addf %proj, %bias : f16
-        linalg.yield %sum : f16
-      } -> tensor<?x?xf16>
-      scf.yield %output_biased : tensor<?x?xf16>
-    } else {
-      scf.yield %output_proj : tensor<?x?xf16>
-    }
+    // OLMoE: no output bias. Use output_proj directly.
 
     // Extract new K/V for cache update: [batch, 1, n_head_kv, head_dim] -> [batch, n_head_kv, head_dim]
     %k_new = tensor.collapse_shape %k_rope_4d [[0], [1, 2], [3]] : tensor<?x?x?x?xf16> into tensor<?x?x?xf16>
     %v_new = tensor.collapse_shape %v_reshaped_4d [[0], [1, 2], [3]] : tensor<?x?x?x?xf16> into tensor<?x?x?xf16>
 
-    util.return %output, %k_new, %v_new : tensor<?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>
+    util.return %output_proj, %k_new, %v_new : tensor<?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>
   }
 
 }
