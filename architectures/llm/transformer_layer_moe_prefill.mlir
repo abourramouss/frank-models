@@ -98,8 +98,7 @@ module @transformer_layer_moe_prefill_components {
       index,                 // n_expert
       index,                 // n_expert_used
       index,                 // n_embd
-      index,                 // n_ff
-      i1                     // normalize_weights
+      index                  // n_ff
   ) -> tensor<?x?xf16>
 
   // KV cache scatter for prefill
@@ -133,7 +132,6 @@ module @transformer_layer_moe_prefill_components {
       %rope_freq_base: f32,
       %rope_freq_scale: f32,
       %use_bias: i1,
-      %normalize_weights: i1,
       %use_qk_norm: i1
   ) -> (tensor<?x?x?xf16>,               // output: [batch, seq_len, n_embd]
         !util.list<?>) {                 // cache_out with K/V written
@@ -224,11 +222,10 @@ module @transformer_layer_moe_prefill_components {
     %moe_out = util.call @moe_ffn_components.moe_ffn_block(
         %ffn_normed, %gate_inp_w,
         %up_exps_w, %gate_exps_w, %down_exps_w,
-        %n_expert, %n_expert_used, %n_embd, %n_ff,
-        %normalize_weights)
+        %n_expert, %n_expert_used, %n_embd, %n_ff)
         : (tensor<?x?xf16>, tensor<?x?xf16>,
            tensor<?x?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>,
-           index, index, index, index, i1) -> tensor<?x?xf16>
+           index, index, index, index) -> tensor<?x?xf16>
 
     // Unflatten MoE output back to [batch, seq_len, n_embd].
     %moe_out_3d = tensor.expand_shape %moe_out [[0, 1], [2]]

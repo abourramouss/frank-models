@@ -41,13 +41,7 @@ module @transformer_layer_moe_decode_components {
   util.func private @model_params.attn_qkv_weight(i32) -> tensor<?x?xf16>
   util.func private @model_params.attn_output_weight(i32) -> tensor<?x?xf16>
 
-  // Attention biases (may be dummy zeros if use_bias=false)
-  util.func private @model_params.attn_q_bias(i32) -> tensor<?xf16>
-  util.func private @model_params.attn_k_bias(i32) -> tensor<?xf16>
-  util.func private @model_params.attn_v_bias(i32) -> tensor<?xf16>
-  util.func private @model_params.attn_output_bias(i32) -> tensor<?xf16>
-
-  // QK norm weights (may be dummy if use_qk_norm=false)
+  // QK norm weights
   util.func private @model_params.attn_q_norm_weight(i32) -> tensor<?xf16>
   util.func private @model_params.attn_k_norm_weight(i32) -> tensor<?xf16>
 
@@ -93,17 +87,11 @@ module @transformer_layer_moe_decode_components {
       tensor<?x?x?x?xf16>,     // v_cached: [batch, ctx_len, n_head_kv, head_dim]
       tensor<?x?xf16>,         // wqkv (fused QKV weight)
       tensor<?x?xf16>,         // wo
-      tensor<?xf16>,           // bq
-      tensor<?xf16>,           // bk
-      tensor<?xf16>,           // bv
-      tensor<?xf16>,           // bo
-      i1,                      // use_bias
       index,                   // n_head
       index,                   // n_head_kv
       index,                   // n_embd
       f32,                     // rope_freq_base
       f32,                     // rope_freq_scale
-      i1,                      // use_qk_norm
       tensor<?xf16>,           // q_norm_weight [head_dim]
       tensor<?xf16>,           // k_norm_weight [head_dim]
       f32                      // rms_eps (for QK norm)
@@ -120,8 +108,7 @@ module @transformer_layer_moe_decode_components {
       index,                 // n_expert
       index,                 // n_expert_used
       index,                 // n_embd
-      index,                 // n_ff
-      i1                     // normalize_weights
+      index                  // n_ff
   ) -> tensor<?x?xf16>
 
   // ===== Layer function =====
@@ -142,10 +129,7 @@ module @transformer_layer_moe_decode_components {
       %n_expert_used: index,
       %rms_eps: f32,
       %rope_freq_base: f32,
-      %rope_freq_scale: f32,
-      %use_bias: i1,
-      %normalize_weights: i1,
-      %use_qk_norm: i1
+      %rope_freq_scale: f32
   ) -> (tensor<?x?xf16>,                    // output: [batch, n_embd]
         !util.list<?>) {                    // cache_out with new K/V written
     %c0 = arith.constant 0 : index
@@ -161,11 +145,6 @@ module @transformer_layer_moe_decode_components {
 
     %wqkv = util.call @model_params.attn_qkv_weight(%layer_idx) : (i32) -> tensor<?x?xf16>
     %wo = util.call @model_params.attn_output_weight(%layer_idx) : (i32) -> tensor<?x?xf16>
-
-    %bq = util.call @model_params.attn_q_bias(%layer_idx) : (i32) -> tensor<?xf16>
-    %bk = util.call @model_params.attn_k_bias(%layer_idx) : (i32) -> tensor<?xf16>
-    %bv = util.call @model_params.attn_v_bias(%layer_idx) : (i32) -> tensor<?xf16>
-    %bo = util.call @model_params.attn_output_bias(%layer_idx) : (i32) -> tensor<?xf16>
 
     %q_norm_w = util.call @model_params.attn_q_norm_weight(%layer_idx) : (i32) -> tensor<?xf16>
     %k_norm_w = util.call @model_params.attn_k_norm_weight(%layer_idx) : (i32) -> tensor<?xf16>
@@ -193,16 +172,14 @@ module @transformer_layer_moe_decode_components {
         %attn_normed, %positions,
         %k_cached, %v_cached,
         %wqkv, %wo,
-        %bq, %bk, %bv, %bo,
-        %use_bias, %n_head, %n_head_kv, %n_embd,
+        %n_head, %n_head_kv, %n_embd,
         %rope_freq_base, %rope_freq_scale,
-        %use_qk_norm, %q_norm_w, %k_norm_w, %rms_eps)
+        %q_norm_w, %k_norm_w, %rms_eps)
         : (tensor<?x?xf16>, tensor<?xi64>,
            tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>,
            tensor<?x?xf16>, tensor<?x?xf16>,
-           tensor<?xf16>, tensor<?xf16>, tensor<?xf16>, tensor<?xf16>,
-           i1, index, index, index, f32, f32,
-           i1, tensor<?xf16>, tensor<?xf16>, f32)
+           index, index, index, f32, f32,
+           tensor<?xf16>, tensor<?xf16>, f32)
         -> (tensor<?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>)
 
     // Scatter new K/V to cache.
@@ -238,11 +215,10 @@ module @transformer_layer_moe_decode_components {
     %moe_out = util.call @moe_ffn_components.moe_ffn_block(
         %ffn_normed, %gate_inp_w,
         %up_exps_w, %gate_exps_w, %down_exps_w,
-        %n_expert, %n_expert_used, %n_embd, %n_ff,
-        %normalize_weights)
+        %n_expert, %n_expert_used, %n_embd, %n_ff)
         : (tensor<?x?xf16>, tensor<?x?xf16>,
            tensor<?x?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>,
-           index, index, index, index, i1) -> tensor<?x?xf16>
+           index, index, index, index) -> tensor<?x?xf16>
 
     // Residual connection: residual1 + moe_out.
     %output_init = tensor.empty(%batch, %n_embd) : tensor<?x?xf16>

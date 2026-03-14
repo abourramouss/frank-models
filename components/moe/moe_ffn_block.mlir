@@ -27,8 +27,7 @@ module @moe_ffn_components {
       %n_expert: index,
       %n_expert_used: index,
       %n_embd: index,
-      %n_ff: index,
-      %normalize_weights: i1
+      %n_ff: index
   ) -> tensor<?x?xf16> {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
@@ -87,42 +86,7 @@ module @moe_ffn_components {
     } -> tensor<?x?xf32>, tensor<?x?xi32>
 
     // Step 4: Conditional weight normalization (f32).
-    %weights_normalized = scf.if %normalize_weights -> (tensor<?x?xf32>) {
-      %sum_init = tensor.empty(%n_tokens) : tensor<?xf32>
-      %sum_filled = linalg.fill ins(%zero_f32 : f32) outs(%sum_init : tensor<?xf32>) -> tensor<?xf32>
-
-      %weights_sum = linalg.generic {
-        indexing_maps = [
-          affine_map<(d0, d1) -> (d0, d1)>,
-          affine_map<(d0, d1) -> (d1)>
-        ],
-        iterator_types = ["reduction", "parallel"]
-      } ins(%weights : tensor<?x?xf32>) outs(%sum_filled : tensor<?xf32>) {
-      ^bb0(%w: f32, %acc: f32):
-        %sum = arith.addf %w, %acc : f32
-        linalg.yield %sum : f32
-      } -> tensor<?xf32>
-
-      %weights_norm_init = tensor.empty(%n_expert_used, %n_tokens) : tensor<?x?xf32>
-      %weights_norm = linalg.generic {
-        indexing_maps = [
-          affine_map<(d0, d1) -> (d0, d1)>,
-          affine_map<(d0, d1) -> (d1)>,
-          affine_map<(d0, d1) -> (d0, d1)>
-        ],
-        iterator_types = ["parallel", "parallel"]
-      } ins(%weights, %weights_sum : tensor<?x?xf32>, tensor<?xf32>)
-        outs(%weights_norm_init : tensor<?x?xf32>) {
-      ^bb0(%w: f32, %s: f32, %out: f32):
-        %normalized = arith.divf %w, %s : f32
-        linalg.yield %normalized : f32
-      } -> tensor<?x?xf32>
-
-      scf.yield %weights_norm : tensor<?x?xf32>
-    } else {
-      scf.yield %weights : tensor<?x?xf32>
-    }
-
+    // OLMoE: normalize_weights=false, skip normalization.
     // Truncate weights to f16 for the data path.
     %weights_f16_init = tensor.empty(%n_expert_used, %n_tokens) : tensor<?x?xf16>
     %weights_f16 = linalg.generic {
@@ -131,7 +95,7 @@ module @moe_ffn_components {
         affine_map<(d0, d1) -> (d0, d1)>
       ],
       iterator_types = ["parallel", "parallel"]
-    } ins(%weights_normalized : tensor<?x?xf32>) outs(%weights_f16_init : tensor<?x?xf16>) {
+    } ins(%weights : tensor<?x?xf32>) outs(%weights_f16_init : tensor<?x?xf16>) {
     ^bb0(%in: f32, %out: f16):
       %v = arith.truncf %in : f32 to f16
       linalg.yield %v : f16

@@ -53,19 +53,13 @@ module @attention_block_decode_components {
       %v_cached: tensor<?x?x?x?xf16>,       // [batch, ctx_len, n_head_kv, head_dim]
       %wqkv: tensor<?x?xf16>,                // [n_embd, n_embd + 2*n_embd_kv] (fused QKV)
       %wo: tensor<?x?xf16>,                  // [n_embd, n_embd]
-      %bq: tensor<?xf16>,                    // [n_embd] - may be dummy if not used
-      %bk: tensor<?xf16>,                    // [n_embd_kv]
-      %bv: tensor<?xf16>,                    // [n_embd_kv]
-      %bo: tensor<?xf16>,                    // [n_embd]
-      %use_bias: i1,                         // flag to enable/disable biases
       %n_head: index,
       %n_head_kv: index,
       %n_embd: index,
       %rope_freq_base: f32,
       %rope_freq_scale: f32,
-      %use_qk_norm: i1,                      // flag to enable/disable QK norm
-      %q_norm_weight: tensor<?xf16>,         // [n_embd] - may be dummy if not used
-      %k_norm_weight: tensor<?xf16>,         // [n_embd_kv] - may be dummy if not used
+      %q_norm_weight: tensor<?xf16>,         // [n_embd] - QK norm weight
+      %k_norm_weight: tensor<?xf16>,         // [n_embd_kv] - QK norm weight
       %rms_eps: f32                          // epsilon for QK norm
   ) -> (tensor<?x?xf16>,                     // output: [batch, n_embd]
         tensor<?x?x?xf16>,                   // k_new: [batch, n_head_kv, head_dim]
@@ -120,13 +114,7 @@ module @attention_block_decode_components {
     %v_proj = tensor.extract_slice %qkv_proj[0, %v_offset] [%batch, %n_embd_kv] [1, 1]
         : tensor<?x?xf16> to tensor<?x?xf16>
 
-    // Conditionally add biases if enabled.
-    // bias_add: out[b, i] = proj[b, i] + bias[i]
-    %q_bias_out_init = tensor.empty(%batch, %n_embd) : tensor<?x?xf16>
-    // OLMoE: no bias (use_bias=false), always QK norm (use_qk_norm=true).
-    // Removing scf.if conditionals to eliminate fusion barriers.
-
-    // QK norm directly on projections (no bias add).
+    // OLMoE: no bias, always QK norm. Apply RMS norm directly on projections.
     %q_normed = util.call @rms_norm_components.rms_norm_linalg(
         %q_proj, %q_norm_weight, %rms_eps)
         : (tensor<?x?xf16>, tensor<?xf16>, f32) -> tensor<?x?xf16>
