@@ -4,18 +4,13 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Indirect matrix multiply for expert selection (ggml_mul_mat_id decomposition).
-// Reference: llama.cpp ggml_mul_mat_id.
+// Fused indirect matrix multiply for MoE expert selection.
+// Combines gather + matmul into a single linalg.generic that reads
+// expert weights inline via tensor.extract — no intermediate gather buffer.
 //
-// Dynamically selects expert weight matrices based on indices and performs
-// batched matrix multiplication. For MoE layers: each token uses different
-// expert weights based on routing decisions.
-//
-// For each token t and each selected expert slot e:
+// For each expert slot e and token t:
 //   expert_id = ids[e, t]
-//   result[:, e, t] = weights[:, :, expert_id] @ input[:, e, t]
-//
-// Decomposed into: transpose → gather → reshape → batch_matmul → reshape.
+//   result[out_dim, e, t] = sum_k(weights[expert_id, out_dim, k] * input[k, e, t])
 
 module @moe_components {
 
@@ -34,78 +29,39 @@ module @moe_components {
     %n_expert_used = tensor.dim %input, %c1 : tensor<?x?x?xf16>
     %n_tokens = tensor.dim %input, %c2 : tensor<?x?x?xf16>
 
-    // Weights are already [n_expert, n_out, n_in] — no transpose needed.
-
-    // Flatten indices for batched gather: [n_expert_used * n_tokens].
-    %batch_size = arith.muli %n_expert_used, %n_tokens : index
-    %ids_flat = tensor.collapse_shape %ids [[0, 1]]
-      : tensor<?x?xi32> into tensor<?xi32>
-
-    // Step 3: Gather expert matrices based on flattened indices.
-    // Output: [n_expert_used * n_tokens, n_out, n_in].
-    %gathered_init = tensor.empty(%batch_size, %n_out, %n_in) : tensor<?x?x?xf16>
-    %weights_gathered = iree_linalg_ext.gather dimension_map = [0]
-      ins(%weights, %ids_flat : tensor<?x?x?xf16>, tensor<?xi32>)
-      outs(%gathered_init : tensor<?x?x?xf16>)
-      -> tensor<?x?x?xf16>
-
-    // Step 4: Reshape input for batched matmul.
-    // Transpose input: [n_in, n_expert_used, n_tokens] -> [n_expert_used, n_tokens, n_in].
-    %input_perm_init = tensor.empty(%n_expert_used, %n_tokens, %n_in) : tensor<?x?x?xf16>
-    %input_perm = linalg.generic {
-      indexing_maps = [
-        affine_map<(d0, d1, d2) -> (d0, d1, d2)>,
-        affine_map<(d0, d1, d2) -> (d1, d2, d0)>
-      ],
-      iterator_types = ["parallel", "parallel", "parallel"]
-    } ins(%input : tensor<?x?x?xf16>) outs(%input_perm_init : tensor<?x?x?xf16>) {
-    ^bb0(%in: f16, %out: f16):
-      linalg.yield %in : f16
-    } -> tensor<?x?x?xf16>
-
-    // Flatten to [n_expert_used * n_tokens, n_in].
-    %input_flat = tensor.collapse_shape %input_perm [[0, 1], [2]]
-      : tensor<?x?x?xf16> into tensor<?x?xf16>
-
-    // Expand to [n_expert_used * n_tokens, n_in, 1] for batched matmul.
-    %input_batched = tensor.expand_shape %input_flat [[0], [1, 2]]
-      output_shape [%batch_size, %n_in, 1]
-      : tensor<?x?xf16> into tensor<?x?x1xf16>
-
-    // Step 5: Batched matrix-vector multiply.
-    // [batch, n_out, n_in] @ [batch, n_in, 1] -> [batch, n_out, 1]
+    // Fused gather + matmul: single linalg.generic with reduction.
+    // Output: [n_out, n_expert_used, n_tokens]
+    // For each (out_dim, expert_slot, token):
+    //   expert_id = ids[expert_slot, token]
+    //   result += weights[expert_id, out_dim, k] * input[k, expert_slot, token]
     %zero = arith.constant 0.0 : f16
-    %result_batched_init = tensor.empty(%batch_size, %n_out) : tensor<?x?x1xf16>
-    %result_batched_filled = linalg.fill ins(%zero : f16) outs(%result_batched_init : tensor<?x?x1xf16>) -> tensor<?x?x1xf16>
-    %result_batched = linalg.batch_matmul
-      ins(%weights_gathered, %input_batched : tensor<?x?x?xf16>, tensor<?x?x1xf16>)
-      outs(%result_batched_filled : tensor<?x?x1xf16>)
-      -> tensor<?x?x1xf16>
+    %output_init = tensor.empty(%n_out, %n_expert_used, %n_tokens) : tensor<?x?x?xf16>
+    %output_filled = linalg.fill ins(%zero : f16) outs(%output_init : tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
 
-    // Step 6: Reshape to final output [n_out, n_expert_used, n_tokens].
-    // Collapse [batch, n_out, 1] to [batch, n_out].
-    %result_squeezed = tensor.collapse_shape %result_batched [[0], [1, 2]]
-      : tensor<?x?x1xf16> into tensor<?x?xf16>
-
-    // Expand [batch, n_out] to [n_expert_used, n_tokens, n_out].
-    %result_expanded = tensor.expand_shape %result_squeezed [[0, 1], [2]]
-      output_shape [%n_expert_used, %n_tokens, %n_out]
-      : tensor<?x?xf16> into tensor<?x?x?xf16>
-
-    // Transpose to [n_out, n_expert_used, n_tokens].
-    %final_init = tensor.empty(%n_out, %n_expert_used, %n_tokens) : tensor<?x?x?xf16>
-    %final = linalg.generic {
+    %result = linalg.generic {
       indexing_maps = [
-        affine_map<(d0, d1, d2) -> (d0, d1, d2)>,
-        affine_map<(d0, d1, d2) -> (d2, d0, d1)>
+        affine_map<(d_out, d_expert, d_token, d_k) -> (d_k, d_expert, d_token)>,   // input [n_in, n_expert_used, n_tokens]
+        affine_map<(d_out, d_expert, d_token, d_k) -> (d_expert, d_token)>,          // ids [n_expert_used, n_tokens]
+        affine_map<(d_out, d_expert, d_token, d_k) -> (d_out, d_expert, d_token)>   // output [n_out, n_expert_used, n_tokens]
       ],
-      iterator_types = ["parallel", "parallel", "parallel"]
-    } ins(%result_expanded : tensor<?x?x?xf16>) outs(%final_init : tensor<?x?x?xf16>) {
-    ^bb0(%in: f16, %out: f16):
-      linalg.yield %in : f16
+      iterator_types = ["parallel", "parallel", "parallel", "reduction"]
+    } ins(%input, %ids : tensor<?x?x?xf16>, tensor<?x?xi32>)
+      outs(%output_filled : tensor<?x?x?xf16>) {
+    ^bb0(%in_val: f16, %expert_id_i32: i32, %acc: f16):
+      %out_idx = linalg.index 0 : index
+      %k_idx = linalg.index 3 : index
+
+      // Gather weight inline: weights[expert_id, out_idx, k_idx]
+      %expert_id = arith.index_cast %expert_id_i32 : i32 to index
+      %w_val = tensor.extract %weights[%expert_id, %out_idx, %k_idx] : tensor<?x?x?xf16>
+
+      // Multiply-accumulate
+      %prod = arith.mulf %w_val, %in_val : f16
+      %sum = arith.addf %acc, %prod : f16
+      linalg.yield %sum : f16
     } -> tensor<?x?x?xf16>
 
-    util.return %final : tensor<?x?x?xf16>
+    util.return %result : tensor<?x?x?xf16>
   }
 
 }
