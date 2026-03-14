@@ -17,14 +17,16 @@
 // Logical shapes:
 //   input:           [batch, seq_len, n_embd]           - Input hidden states
 //   positions:       [batch, seq_len]                   - Position indices for RoPE
-//   cache:           !util.list<?>                      - Unified KV cache
+//   k_cache:         tensor<?x?x?x?xf16>               - K cache [n_blocks, block_size, n_head_kv, head_dim]
+//   v_cache:         tensor<?x?x?x?xf16>               - V cache [n_blocks, block_size, n_head_kv, head_dim]
 //   block_tables:    [n_layers, batch, max_blocks]      - Block indirection
 //   start_positions: [batch]                            - Where to start writing (usually 0)
 //   block_size:      index                              - Tokens per block
 //
 // Returns:
 //   output:          [batch, seq_len, n_embd]           - Output hidden states
-//   cache_out:       !util.list<?>                      - Cache with K/V written
+//   k_cache_out:     tensor<?x?x?x?xf16>               - Updated K cache
+//   v_cache_out:     tensor<?x?x?x?xf16>               - Updated V cache
 //
 // Reference: transformer_layer_moe.mlir, attention_block_prefill.mlir, kvcache.mlir
 
@@ -108,21 +110,24 @@ module @transformer_layer_moe_prefill_components {
 
   // KV cache scatter for prefill
   util.func private @kvcache_components.scatter_prefill(
-      !util.list<?>,           // cache
-      index,                   // layer
-      tensor<?x?x?x?xf16>,     // new_k: [batch, seq_len, n_head_kv, head_dim]
-      tensor<?x?x?x?xf16>,     // new_v: [batch, seq_len, n_head_kv, head_dim]
-      tensor<?x?x?xi32>,       // block_tables: [n_layers, batch, max_blocks]
-      tensor<?xi32>,           // start_positions: [batch]
-      index                    // block_size
-  ) -> !util.list<?>
+      tensor<?x?x?x?xf16>,      // k_cache
+      tensor<?x?x?x?xf16>,      // v_cache
+      index,                     // layer
+      tensor<?x?x?x?xf16>,      // new_k: [batch, seq_len, n_head_kv, head_dim]
+      tensor<?x?x?x?xf16>,      // new_v: [batch, seq_len, n_head_kv, head_dim]
+      tensor<?x?x?xi32>,        // block_tables: [n_layers, batch, max_blocks]
+      tensor<?xi32>,             // start_positions: [batch]
+      index                     // block_size
+  ) -> (tensor<?x?x?x?xf16>,   // k_cache_out
+        tensor<?x?x?x?xf16>)   // v_cache_out
 
   // ===== Layer function =====
 
   util.func public @transformer_layer_moe_prefill(
       %input: tensor<?x?x?xf16>,        // [batch, seq_len, n_embd]
       %positions: tensor<?x?xi64>,       // [batch, seq_len]
-      %cache: !util.list<?>,             // Unified KV cache
+      %k_cache: tensor<?x?x?x?xf16>,    // K cache
+      %v_cache: tensor<?x?x?x?xf16>,    // V cache
       %block_tables: tensor<?x?x?xi32>,  // [n_layers, batch, max_blocks]
       %start_positions: tensor<?xi32>,   // [batch] - where to start writing (usually 0)
       %block_size: index,
@@ -140,7 +145,8 @@ module @transformer_layer_moe_prefill_components {
       %normalize_weights: i1,
       %use_qk_norm: i1
   ) -> (tensor<?x?x?xf16>,               // output: [batch, seq_len, n_embd]
-        !util.list<?>) {                 // cache_out with K/V written
+        tensor<?x?x?x?xf16>,             // k_cache_out
+        tensor<?x?x?x?xf16>) {           // v_cache_out
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
@@ -259,13 +265,14 @@ module @transformer_layer_moe_prefill_components {
 
     // Scatter K/V to cache for this layer.
     %layer = arith.index_cast %layer_idx : i32 to index
-    %cache_updated = util.call @kvcache_components.scatter_prefill(
-        %cache, %layer, %k_out, %v_out,
+    %k_cache_updated, %v_cache_updated = util.call @kvcache_components.scatter_prefill(
+        %k_cache, %v_cache, %layer, %k_out, %v_out,
         %block_tables, %start_positions, %block_size)
-        : (!util.list<?>, index, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>,
-           tensor<?x?x?xi32>, tensor<?xi32>, index) -> !util.list<?>
+        : (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>, index, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>,
+           tensor<?x?x?xi32>, tensor<?xi32>, index)
+        -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
 
-    util.return %output, %cache_updated : tensor<?x?x?xf16>, !util.list<?>
+    util.return %output, %k_cache_updated, %v_cache_updated : tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
   }
 
 }

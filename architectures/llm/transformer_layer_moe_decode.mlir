@@ -18,14 +18,16 @@
 // Logical shapes:
 //   input:           [batch, n_embd]               - Single token hidden state per sequence
 //   positions:       [batch]                       - Single position per sequence
-//   cache:           !util.list<?>                 - Unified KV cache (K_blocks, V_blocks)
+//   k_cache:         tensor<?x?x?x?xf16>          - K cache [n_blocks, block_size, n_head_kv, head_dim]
+//   v_cache:         tensor<?x?x?x?xf16>          - V cache [n_blocks, block_size, n_head_kv, head_dim]
 //   block_tables:    [n_layers, batch, max_blocks] - Block indirection
 //   context_lens:    [n_layers, batch]             - Current context length per layer/seq
 //   max_context_len: index                         - Max context for gather output shape
 //
 // Returns:
 //   output:          [batch, n_embd]               - Output hidden state
-//   cache_out:       !util.list<?>                 - Cache with new K/V written
+//   k_cache_out:     tensor<?x?x?x?xf16>          - Updated K cache
+//   v_cache_out:     tensor<?x?x?x?xf16>          - Updated V cache
 //
 // Reference: transformer_layer_moe.mlir, attention_block_decode.mlir, kvcache.mlir
 
@@ -69,23 +71,26 @@ module @transformer_layer_moe_decode_components {
 
   // KV cache: gather K/V for a specific layer
   util.func private @kvcache_components.gather(
-      !util.list<?>,           // cache
-      index,                   // layer
-      tensor<?x?x?xi32>,       // block_tables [n_layers, batch, max_blocks]
-      tensor<?x?xi32>,         // context_lens [n_layers, batch]
-      index                    // max_context_len
+      tensor<?x?x?x?xf16>,      // k_cache
+      tensor<?x?x?x?xf16>,      // v_cache
+      index,                     // layer
+      tensor<?x?x?xi32>,        // block_tables [n_layers, batch, max_blocks]
+      tensor<?x?xi32>,          // context_lens [n_layers, batch]
+      index                     // max_context_len
   ) -> (tensor<?x?x?x?xf16>,   // k_gathered: [batch, max_ctx, n_head_kv, head_dim]
         tensor<?x?x?x?xf16>)   // v_gathered: [batch, max_ctx, n_head_kv, head_dim]
 
   // KV cache: scatter new K/V for a specific layer (decode: single token)
   util.func private @kvcache_components.scatter_decode(
-      !util.list<?>,           // cache
-      index,                   // layer
-      tensor<?x?x?xf16>,       // new_k: [batch, n_head_kv, head_dim]
-      tensor<?x?x?xf16>,       // new_v: [batch, n_head_kv, head_dim]
-      tensor<?x?x?xi32>,       // block_tables: [n_layers, batch, max_blocks]
-      tensor<?xi64>            // positions: [batch]
-  ) -> !util.list<?>
+      tensor<?x?x?x?xf16>,      // k_cache
+      tensor<?x?x?x?xf16>,      // v_cache
+      index,                     // layer
+      tensor<?x?x?xf16>,        // new_k: [batch, n_head_kv, head_dim]
+      tensor<?x?x?xf16>,        // new_v: [batch, n_head_kv, head_dim]
+      tensor<?x?x?xi32>,        // block_tables: [n_layers, batch, max_blocks]
+      tensor<?xi64>             // positions: [batch]
+  ) -> (tensor<?x?x?x?xf16>,   // k_cache_out
+        tensor<?x?x?x?xf16>)   // v_cache_out
 
   // Decode attention: process single token with cached K/V
   util.func private @attention_block_decode_components.attention_block_decode(
@@ -133,7 +138,8 @@ module @transformer_layer_moe_decode_components {
   util.func public @transformer_layer_moe_decode(
       %input: tensor<?x?xf16>,             // [batch, n_embd]
       %positions: tensor<?xi64>,            // [batch]
-      %cache: !util.list<?>,                // Unified KV cache
+      %k_cache: tensor<?x?x?x?xf16>,       // K cache
+      %v_cache: tensor<?x?x?x?xf16>,       // V cache
       %block_tables: tensor<?x?x?xi32>,     // [n_layers, batch, max_blocks]
       %context_lens: tensor<?x?xi32>,       // [n_layers, batch]
       %max_context_len: index,
@@ -151,7 +157,8 @@ module @transformer_layer_moe_decode_components {
       %normalize_weights: i1,
       %use_qk_norm: i1
   ) -> (tensor<?x?xf16>,                    // output: [batch, n_embd]
-        !util.list<?>) {                    // cache_out with new K/V written
+        tensor<?x?x?x?xf16>,               // k_cache_out
+        tensor<?x?x?x?xf16>) {             // v_cache_out
     %c0 = arith.constant 0 : index
     %batch = tensor.dim %input, %c0 : tensor<?x?xf16>
 
@@ -190,8 +197,8 @@ module @transformer_layer_moe_decode_components {
 
     // Gather cached K/V for this layer: [batch, max_ctx, n_head_kv, head_dim].
     %k_cached, %v_cached = util.call @kvcache_components.gather(
-        %cache, %layer, %block_tables, %context_lens, %max_context_len)
-        : (!util.list<?>, index, tensor<?x?x?xi32>, tensor<?x?xi32>, index)
+        %k_cache, %v_cache, %layer, %block_tables, %context_lens, %max_context_len)
+        : (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>, index, tensor<?x?x?xi32>, tensor<?x?xi32>, index)
         -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
 
     // Decode attention with cached K/V.
@@ -212,10 +219,11 @@ module @transformer_layer_moe_decode_components {
         -> (tensor<?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>)
 
     // Scatter new K/V to cache.
-    %cache_updated = util.call @kvcache_components.scatter_decode(
-        %cache, %layer, %k_new, %v_new, %block_tables, %positions)
-        : (!util.list<?>, index, tensor<?x?x?xf16>, tensor<?x?x?xf16>,
-           tensor<?x?x?xi32>, tensor<?xi64>) -> !util.list<?>
+    %k_cache_updated, %v_cache_updated = util.call @kvcache_components.scatter_decode(
+        %k_cache, %v_cache, %layer, %k_new, %v_new, %block_tables, %positions)
+        : (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>, index, tensor<?x?x?xf16>, tensor<?x?x?xf16>,
+           tensor<?x?x?xi32>, tensor<?xi64>)
+        -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
 
     // Residual connection: input + attn_out.
     %residual1_init = tensor.empty(%batch, %n_embd) : tensor<?x?xf16>
@@ -266,7 +274,7 @@ module @transformer_layer_moe_decode_components {
       linalg.yield %sum : f16
     } -> tensor<?x?xf16>
 
-    util.return %output, %cache_updated : tensor<?x?xf16>, !util.list<?>
+    util.return %output, %k_cache_updated, %v_cache_updated : tensor<?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
   }
 
 }
