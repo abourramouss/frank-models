@@ -1477,112 +1477,112 @@ module @model_params {
     %c15 = arith.constant 15 : i32
 
     %is0 = arith.cmpi eq, %layer, %c0 : i32
-    %w = scf.if %is0 -> (tensor<1024x2048x64xf16>) {
-      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-      scf.yield %t : tensor<1024x2048x64xf16>
+    %w = scf.if %is0 -> (tensor<64x1024x2048xf16>) {
+      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+      scf.yield %t : tensor<64x1024x2048xf16>
     } else {
       %is1 = arith.cmpi eq, %layer, %c1 : i32
-      %r1 = scf.if %is1 -> (tensor<1024x2048x64xf16>) {
-        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.1.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-        scf.yield %t : tensor<1024x2048x64xf16>
+      %r1 = scf.if %is1 -> (tensor<64x1024x2048xf16>) {
+        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.1.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+        scf.yield %t : tensor<64x1024x2048xf16>
       } else {
         %is2 = arith.cmpi eq, %layer, %c2 : i32
-        %r2 = scf.if %is2 -> (tensor<1024x2048x64xf16>) {
-          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.2.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-          scf.yield %t : tensor<1024x2048x64xf16>
+        %r2 = scf.if %is2 -> (tensor<64x1024x2048xf16>) {
+          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.2.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+          scf.yield %t : tensor<64x1024x2048xf16>
         } else {
           %is3 = arith.cmpi eq, %layer, %c3 : i32
-          %r3 = scf.if %is3 -> (tensor<1024x2048x64xf16>) {
-            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.3.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-            scf.yield %t : tensor<1024x2048x64xf16>
+          %r3 = scf.if %is3 -> (tensor<64x1024x2048xf16>) {
+            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.3.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+            scf.yield %t : tensor<64x1024x2048xf16>
           } else {
             %is4 = arith.cmpi eq, %layer, %c4 : i32
-            %r4 = scf.if %is4 -> (tensor<1024x2048x64xf16>) {
-              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.4.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-              scf.yield %t : tensor<1024x2048x64xf16>
+            %r4 = scf.if %is4 -> (tensor<64x1024x2048xf16>) {
+              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.4.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+              scf.yield %t : tensor<64x1024x2048xf16>
             } else {
               %is5 = arith.cmpi eq, %layer, %c5 : i32
-              %r5 = scf.if %is5 -> (tensor<1024x2048x64xf16>) {
-                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.5.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                scf.yield %t : tensor<1024x2048x64xf16>
+              %r5 = scf.if %is5 -> (tensor<64x1024x2048xf16>) {
+                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.5.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                scf.yield %t : tensor<64x1024x2048xf16>
               } else {
                 %is6 = arith.cmpi eq, %layer, %c6 : i32
-                %r6 = scf.if %is6 -> (tensor<1024x2048x64xf16>) {
-                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.6.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                  scf.yield %t : tensor<1024x2048x64xf16>
+                %r6 = scf.if %is6 -> (tensor<64x1024x2048xf16>) {
+                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.6.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                  scf.yield %t : tensor<64x1024x2048xf16>
                 } else {
                   %is7 = arith.cmpi eq, %layer, %c7 : i32
-                  %r7 = scf.if %is7 -> (tensor<1024x2048x64xf16>) {
-                    %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.7.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                    scf.yield %t : tensor<1024x2048x64xf16>
+                  %r7 = scf.if %is7 -> (tensor<64x1024x2048xf16>) {
+                    %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.7.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                    scf.yield %t : tensor<64x1024x2048xf16>
                   } else {
                     %is8 = arith.cmpi eq, %layer, %c8 : i32
-                    %r8 = scf.if %is8 -> (tensor<1024x2048x64xf16>) {
-                      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.8.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                      scf.yield %t : tensor<1024x2048x64xf16>
+                    %r8 = scf.if %is8 -> (tensor<64x1024x2048xf16>) {
+                      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.8.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                      scf.yield %t : tensor<64x1024x2048xf16>
                     } else {
                       %is9 = arith.cmpi eq, %layer, %c9 : i32
-                      %r9 = scf.if %is9 -> (tensor<1024x2048x64xf16>) {
-                        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.9.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                        scf.yield %t : tensor<1024x2048x64xf16>
+                      %r9 = scf.if %is9 -> (tensor<64x1024x2048xf16>) {
+                        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.9.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                        scf.yield %t : tensor<64x1024x2048xf16>
                       } else {
                         %is10 = arith.cmpi eq, %layer, %c10 : i32
-                        %r10 = scf.if %is10 -> (tensor<1024x2048x64xf16>) {
-                          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.10.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                          scf.yield %t : tensor<1024x2048x64xf16>
+                        %r10 = scf.if %is10 -> (tensor<64x1024x2048xf16>) {
+                          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.10.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                          scf.yield %t : tensor<64x1024x2048xf16>
                         } else {
                           %is11 = arith.cmpi eq, %layer, %c11 : i32
-                          %r11 = scf.if %is11 -> (tensor<1024x2048x64xf16>) {
-                            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.11.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                            scf.yield %t : tensor<1024x2048x64xf16>
+                          %r11 = scf.if %is11 -> (tensor<64x1024x2048xf16>) {
+                            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.11.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                            scf.yield %t : tensor<64x1024x2048xf16>
                           } else {
                             %is12 = arith.cmpi eq, %layer, %c12 : i32
-                            %r12 = scf.if %is12 -> (tensor<1024x2048x64xf16>) {
-                              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.12.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                              scf.yield %t : tensor<1024x2048x64xf16>
+                            %r12 = scf.if %is12 -> (tensor<64x1024x2048xf16>) {
+                              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.12.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                              scf.yield %t : tensor<64x1024x2048xf16>
                             } else {
                               %is13 = arith.cmpi eq, %layer, %c13 : i32
-                              %r13 = scf.if %is13 -> (tensor<1024x2048x64xf16>) {
-                                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.13.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                                scf.yield %t : tensor<1024x2048x64xf16>
+                              %r13 = scf.if %is13 -> (tensor<64x1024x2048xf16>) {
+                                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.13.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                                scf.yield %t : tensor<64x1024x2048xf16>
                               } else {
                                 %is14 = arith.cmpi eq, %layer, %c14 : i32
-                                %r14 = scf.if %is14 -> (tensor<1024x2048x64xf16>) {
-                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.14.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                                  scf.yield %t : tensor<1024x2048x64xf16>
+                                %r14 = scf.if %is14 -> (tensor<64x1024x2048xf16>) {
+                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.14.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                                  scf.yield %t : tensor<64x1024x2048xf16>
                                 } else {
-                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.15.ffn_up_exps.weight"> : tensor<1024x2048x64xf16>
-                                  scf.yield %t : tensor<1024x2048x64xf16>
+                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.15.ffn_up_exps.weight"> : tensor<64x1024x2048xf16>
+                                  scf.yield %t : tensor<64x1024x2048xf16>
                                 }
-                                scf.yield %r14 : tensor<1024x2048x64xf16>
+                                scf.yield %r14 : tensor<64x1024x2048xf16>
                               }
-                              scf.yield %r13 : tensor<1024x2048x64xf16>
+                              scf.yield %r13 : tensor<64x1024x2048xf16>
                             }
-                            scf.yield %r12 : tensor<1024x2048x64xf16>
+                            scf.yield %r12 : tensor<64x1024x2048xf16>
                           }
-                          scf.yield %r11 : tensor<1024x2048x64xf16>
+                          scf.yield %r11 : tensor<64x1024x2048xf16>
                         }
-                        scf.yield %r10 : tensor<1024x2048x64xf16>
+                        scf.yield %r10 : tensor<64x1024x2048xf16>
                       }
-                      scf.yield %r9 : tensor<1024x2048x64xf16>
+                      scf.yield %r9 : tensor<64x1024x2048xf16>
                     }
-                    scf.yield %r8 : tensor<1024x2048x64xf16>
+                    scf.yield %r8 : tensor<64x1024x2048xf16>
                   }
-                  scf.yield %r7 : tensor<1024x2048x64xf16>
+                  scf.yield %r7 : tensor<64x1024x2048xf16>
                 }
-                scf.yield %r6 : tensor<1024x2048x64xf16>
+                scf.yield %r6 : tensor<64x1024x2048xf16>
               }
-              scf.yield %r5 : tensor<1024x2048x64xf16>
+              scf.yield %r5 : tensor<64x1024x2048xf16>
             }
-            scf.yield %r4 : tensor<1024x2048x64xf16>
+            scf.yield %r4 : tensor<64x1024x2048xf16>
           }
-          scf.yield %r3 : tensor<1024x2048x64xf16>
+          scf.yield %r3 : tensor<64x1024x2048xf16>
         }
-        scf.yield %r2 : tensor<1024x2048x64xf16>
+        scf.yield %r2 : tensor<64x1024x2048xf16>
       }
-      scf.yield %r1 : tensor<1024x2048x64xf16>
+      scf.yield %r1 : tensor<64x1024x2048xf16>
     }
-    %dyn = tensor.cast %w : tensor<1024x2048x64xf16> to tensor<?x?x?xf16>
+    %dyn = tensor.cast %w : tensor<64x1024x2048xf16> to tensor<?x?x?xf16>
     util.return %dyn : tensor<?x?x?xf16>
   }
 
@@ -1605,112 +1605,112 @@ module @model_params {
     %c15 = arith.constant 15 : i32
 
     %is0 = arith.cmpi eq, %layer, %c0 : i32
-    %w = scf.if %is0 -> (tensor<1024x2048x64xf16>) {
-      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-      scf.yield %t : tensor<1024x2048x64xf16>
+    %w = scf.if %is0 -> (tensor<64x1024x2048xf16>) {
+      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+      scf.yield %t : tensor<64x1024x2048xf16>
     } else {
       %is1 = arith.cmpi eq, %layer, %c1 : i32
-      %r1 = scf.if %is1 -> (tensor<1024x2048x64xf16>) {
-        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.1.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-        scf.yield %t : tensor<1024x2048x64xf16>
+      %r1 = scf.if %is1 -> (tensor<64x1024x2048xf16>) {
+        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.1.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+        scf.yield %t : tensor<64x1024x2048xf16>
       } else {
         %is2 = arith.cmpi eq, %layer, %c2 : i32
-        %r2 = scf.if %is2 -> (tensor<1024x2048x64xf16>) {
-          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.2.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-          scf.yield %t : tensor<1024x2048x64xf16>
+        %r2 = scf.if %is2 -> (tensor<64x1024x2048xf16>) {
+          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.2.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+          scf.yield %t : tensor<64x1024x2048xf16>
         } else {
           %is3 = arith.cmpi eq, %layer, %c3 : i32
-          %r3 = scf.if %is3 -> (tensor<1024x2048x64xf16>) {
-            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.3.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-            scf.yield %t : tensor<1024x2048x64xf16>
+          %r3 = scf.if %is3 -> (tensor<64x1024x2048xf16>) {
+            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.3.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+            scf.yield %t : tensor<64x1024x2048xf16>
           } else {
             %is4 = arith.cmpi eq, %layer, %c4 : i32
-            %r4 = scf.if %is4 -> (tensor<1024x2048x64xf16>) {
-              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.4.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-              scf.yield %t : tensor<1024x2048x64xf16>
+            %r4 = scf.if %is4 -> (tensor<64x1024x2048xf16>) {
+              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.4.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+              scf.yield %t : tensor<64x1024x2048xf16>
             } else {
               %is5 = arith.cmpi eq, %layer, %c5 : i32
-              %r5 = scf.if %is5 -> (tensor<1024x2048x64xf16>) {
-                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.5.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                scf.yield %t : tensor<1024x2048x64xf16>
+              %r5 = scf.if %is5 -> (tensor<64x1024x2048xf16>) {
+                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.5.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                scf.yield %t : tensor<64x1024x2048xf16>
               } else {
                 %is6 = arith.cmpi eq, %layer, %c6 : i32
-                %r6 = scf.if %is6 -> (tensor<1024x2048x64xf16>) {
-                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.6.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                  scf.yield %t : tensor<1024x2048x64xf16>
+                %r6 = scf.if %is6 -> (tensor<64x1024x2048xf16>) {
+                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.6.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                  scf.yield %t : tensor<64x1024x2048xf16>
                 } else {
                   %is7 = arith.cmpi eq, %layer, %c7 : i32
-                  %r7 = scf.if %is7 -> (tensor<1024x2048x64xf16>) {
-                    %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.7.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                    scf.yield %t : tensor<1024x2048x64xf16>
+                  %r7 = scf.if %is7 -> (tensor<64x1024x2048xf16>) {
+                    %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.7.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                    scf.yield %t : tensor<64x1024x2048xf16>
                   } else {
                     %is8 = arith.cmpi eq, %layer, %c8 : i32
-                    %r8 = scf.if %is8 -> (tensor<1024x2048x64xf16>) {
-                      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.8.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                      scf.yield %t : tensor<1024x2048x64xf16>
+                    %r8 = scf.if %is8 -> (tensor<64x1024x2048xf16>) {
+                      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.8.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                      scf.yield %t : tensor<64x1024x2048xf16>
                     } else {
                       %is9 = arith.cmpi eq, %layer, %c9 : i32
-                      %r9 = scf.if %is9 -> (tensor<1024x2048x64xf16>) {
-                        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.9.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                        scf.yield %t : tensor<1024x2048x64xf16>
+                      %r9 = scf.if %is9 -> (tensor<64x1024x2048xf16>) {
+                        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.9.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                        scf.yield %t : tensor<64x1024x2048xf16>
                       } else {
                         %is10 = arith.cmpi eq, %layer, %c10 : i32
-                        %r10 = scf.if %is10 -> (tensor<1024x2048x64xf16>) {
-                          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.10.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                          scf.yield %t : tensor<1024x2048x64xf16>
+                        %r10 = scf.if %is10 -> (tensor<64x1024x2048xf16>) {
+                          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.10.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                          scf.yield %t : tensor<64x1024x2048xf16>
                         } else {
                           %is11 = arith.cmpi eq, %layer, %c11 : i32
-                          %r11 = scf.if %is11 -> (tensor<1024x2048x64xf16>) {
-                            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.11.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                            scf.yield %t : tensor<1024x2048x64xf16>
+                          %r11 = scf.if %is11 -> (tensor<64x1024x2048xf16>) {
+                            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.11.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                            scf.yield %t : tensor<64x1024x2048xf16>
                           } else {
                             %is12 = arith.cmpi eq, %layer, %c12 : i32
-                            %r12 = scf.if %is12 -> (tensor<1024x2048x64xf16>) {
-                              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.12.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                              scf.yield %t : tensor<1024x2048x64xf16>
+                            %r12 = scf.if %is12 -> (tensor<64x1024x2048xf16>) {
+                              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.12.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                              scf.yield %t : tensor<64x1024x2048xf16>
                             } else {
                               %is13 = arith.cmpi eq, %layer, %c13 : i32
-                              %r13 = scf.if %is13 -> (tensor<1024x2048x64xf16>) {
-                                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.13.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                                scf.yield %t : tensor<1024x2048x64xf16>
+                              %r13 = scf.if %is13 -> (tensor<64x1024x2048xf16>) {
+                                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.13.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                                scf.yield %t : tensor<64x1024x2048xf16>
                               } else {
                                 %is14 = arith.cmpi eq, %layer, %c14 : i32
-                                %r14 = scf.if %is14 -> (tensor<1024x2048x64xf16>) {
-                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.14.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                                  scf.yield %t : tensor<1024x2048x64xf16>
+                                %r14 = scf.if %is14 -> (tensor<64x1024x2048xf16>) {
+                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.14.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                                  scf.yield %t : tensor<64x1024x2048xf16>
                                 } else {
-                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.15.ffn_gate_exps.weight"> : tensor<1024x2048x64xf16>
-                                  scf.yield %t : tensor<1024x2048x64xf16>
+                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.15.ffn_gate_exps.weight"> : tensor<64x1024x2048xf16>
+                                  scf.yield %t : tensor<64x1024x2048xf16>
                                 }
-                                scf.yield %r14 : tensor<1024x2048x64xf16>
+                                scf.yield %r14 : tensor<64x1024x2048xf16>
                               }
-                              scf.yield %r13 : tensor<1024x2048x64xf16>
+                              scf.yield %r13 : tensor<64x1024x2048xf16>
                             }
-                            scf.yield %r12 : tensor<1024x2048x64xf16>
+                            scf.yield %r12 : tensor<64x1024x2048xf16>
                           }
-                          scf.yield %r11 : tensor<1024x2048x64xf16>
+                          scf.yield %r11 : tensor<64x1024x2048xf16>
                         }
-                        scf.yield %r10 : tensor<1024x2048x64xf16>
+                        scf.yield %r10 : tensor<64x1024x2048xf16>
                       }
-                      scf.yield %r9 : tensor<1024x2048x64xf16>
+                      scf.yield %r9 : tensor<64x1024x2048xf16>
                     }
-                    scf.yield %r8 : tensor<1024x2048x64xf16>
+                    scf.yield %r8 : tensor<64x1024x2048xf16>
                   }
-                  scf.yield %r7 : tensor<1024x2048x64xf16>
+                  scf.yield %r7 : tensor<64x1024x2048xf16>
                 }
-                scf.yield %r6 : tensor<1024x2048x64xf16>
+                scf.yield %r6 : tensor<64x1024x2048xf16>
               }
-              scf.yield %r5 : tensor<1024x2048x64xf16>
+              scf.yield %r5 : tensor<64x1024x2048xf16>
             }
-            scf.yield %r4 : tensor<1024x2048x64xf16>
+            scf.yield %r4 : tensor<64x1024x2048xf16>
           }
-          scf.yield %r3 : tensor<1024x2048x64xf16>
+          scf.yield %r3 : tensor<64x1024x2048xf16>
         }
-        scf.yield %r2 : tensor<1024x2048x64xf16>
+        scf.yield %r2 : tensor<64x1024x2048xf16>
       }
-      scf.yield %r1 : tensor<1024x2048x64xf16>
+      scf.yield %r1 : tensor<64x1024x2048xf16>
     }
-    %dyn = tensor.cast %w : tensor<1024x2048x64xf16> to tensor<?x?x?xf16>
+    %dyn = tensor.cast %w : tensor<64x1024x2048xf16> to tensor<?x?x?xf16>
     util.return %dyn : tensor<?x?x?xf16>
   }
 
@@ -1861,112 +1861,112 @@ module @model_params {
     %c15 = arith.constant 15 : i32
 
     %is0 = arith.cmpi eq, %layer, %c0 : i32
-    %w = scf.if %is0 -> (tensor<2048x1024x64xf16>) {
-      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-      scf.yield %t : tensor<2048x1024x64xf16>
+    %w = scf.if %is0 -> (tensor<64x2048x1024xf16>) {
+      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.0.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+      scf.yield %t : tensor<64x2048x1024xf16>
     } else {
       %is1 = arith.cmpi eq, %layer, %c1 : i32
-      %r1 = scf.if %is1 -> (tensor<2048x1024x64xf16>) {
-        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.1.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-        scf.yield %t : tensor<2048x1024x64xf16>
+      %r1 = scf.if %is1 -> (tensor<64x2048x1024xf16>) {
+        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.1.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+        scf.yield %t : tensor<64x2048x1024xf16>
       } else {
         %is2 = arith.cmpi eq, %layer, %c2 : i32
-        %r2 = scf.if %is2 -> (tensor<2048x1024x64xf16>) {
-          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.2.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-          scf.yield %t : tensor<2048x1024x64xf16>
+        %r2 = scf.if %is2 -> (tensor<64x2048x1024xf16>) {
+          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.2.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+          scf.yield %t : tensor<64x2048x1024xf16>
         } else {
           %is3 = arith.cmpi eq, %layer, %c3 : i32
-          %r3 = scf.if %is3 -> (tensor<2048x1024x64xf16>) {
-            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.3.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-            scf.yield %t : tensor<2048x1024x64xf16>
+          %r3 = scf.if %is3 -> (tensor<64x2048x1024xf16>) {
+            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.3.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+            scf.yield %t : tensor<64x2048x1024xf16>
           } else {
             %is4 = arith.cmpi eq, %layer, %c4 : i32
-            %r4 = scf.if %is4 -> (tensor<2048x1024x64xf16>) {
-              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.4.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-              scf.yield %t : tensor<2048x1024x64xf16>
+            %r4 = scf.if %is4 -> (tensor<64x2048x1024xf16>) {
+              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.4.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+              scf.yield %t : tensor<64x2048x1024xf16>
             } else {
               %is5 = arith.cmpi eq, %layer, %c5 : i32
-              %r5 = scf.if %is5 -> (tensor<2048x1024x64xf16>) {
-                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.5.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                scf.yield %t : tensor<2048x1024x64xf16>
+              %r5 = scf.if %is5 -> (tensor<64x2048x1024xf16>) {
+                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.5.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                scf.yield %t : tensor<64x2048x1024xf16>
               } else {
                 %is6 = arith.cmpi eq, %layer, %c6 : i32
-                %r6 = scf.if %is6 -> (tensor<2048x1024x64xf16>) {
-                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.6.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                  scf.yield %t : tensor<2048x1024x64xf16>
+                %r6 = scf.if %is6 -> (tensor<64x2048x1024xf16>) {
+                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.6.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                  scf.yield %t : tensor<64x2048x1024xf16>
                 } else {
                   %is7 = arith.cmpi eq, %layer, %c7 : i32
-                  %r7 = scf.if %is7 -> (tensor<2048x1024x64xf16>) {
-                    %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.7.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                    scf.yield %t : tensor<2048x1024x64xf16>
+                  %r7 = scf.if %is7 -> (tensor<64x2048x1024xf16>) {
+                    %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.7.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                    scf.yield %t : tensor<64x2048x1024xf16>
                   } else {
                     %is8 = arith.cmpi eq, %layer, %c8 : i32
-                    %r8 = scf.if %is8 -> (tensor<2048x1024x64xf16>) {
-                      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.8.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                      scf.yield %t : tensor<2048x1024x64xf16>
+                    %r8 = scf.if %is8 -> (tensor<64x2048x1024xf16>) {
+                      %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.8.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                      scf.yield %t : tensor<64x2048x1024xf16>
                     } else {
                       %is9 = arith.cmpi eq, %layer, %c9 : i32
-                      %r9 = scf.if %is9 -> (tensor<2048x1024x64xf16>) {
-                        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.9.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                        scf.yield %t : tensor<2048x1024x64xf16>
+                      %r9 = scf.if %is9 -> (tensor<64x2048x1024xf16>) {
+                        %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.9.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                        scf.yield %t : tensor<64x2048x1024xf16>
                       } else {
                         %is10 = arith.cmpi eq, %layer, %c10 : i32
-                        %r10 = scf.if %is10 -> (tensor<2048x1024x64xf16>) {
-                          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.10.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                          scf.yield %t : tensor<2048x1024x64xf16>
+                        %r10 = scf.if %is10 -> (tensor<64x2048x1024xf16>) {
+                          %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.10.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                          scf.yield %t : tensor<64x2048x1024xf16>
                         } else {
                           %is11 = arith.cmpi eq, %layer, %c11 : i32
-                          %r11 = scf.if %is11 -> (tensor<2048x1024x64xf16>) {
-                            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.11.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                            scf.yield %t : tensor<2048x1024x64xf16>
+                          %r11 = scf.if %is11 -> (tensor<64x2048x1024xf16>) {
+                            %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.11.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                            scf.yield %t : tensor<64x2048x1024xf16>
                           } else {
                             %is12 = arith.cmpi eq, %layer, %c12 : i32
-                            %r12 = scf.if %is12 -> (tensor<2048x1024x64xf16>) {
-                              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.12.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                              scf.yield %t : tensor<2048x1024x64xf16>
+                            %r12 = scf.if %is12 -> (tensor<64x2048x1024xf16>) {
+                              %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.12.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                              scf.yield %t : tensor<64x2048x1024xf16>
                             } else {
                               %is13 = arith.cmpi eq, %layer, %c13 : i32
-                              %r13 = scf.if %is13 -> (tensor<2048x1024x64xf16>) {
-                                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.13.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                                scf.yield %t : tensor<2048x1024x64xf16>
+                              %r13 = scf.if %is13 -> (tensor<64x2048x1024xf16>) {
+                                %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.13.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                                scf.yield %t : tensor<64x2048x1024xf16>
                               } else {
                                 %is14 = arith.cmpi eq, %layer, %c14 : i32
-                                %r14 = scf.if %is14 -> (tensor<2048x1024x64xf16>) {
-                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.14.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                                  scf.yield %t : tensor<2048x1024x64xf16>
+                                %r14 = scf.if %is14 -> (tensor<64x2048x1024xf16>) {
+                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.14.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                                  scf.yield %t : tensor<64x2048x1024xf16>
                                 } else {
-                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.15.ffn_down_exps.weight"> : tensor<2048x1024x64xf16>
-                                  scf.yield %t : tensor<2048x1024x64xf16>
+                                  %t = flow.tensor.constant #flow.parameter.named<"model"::"blk.15.ffn_down_exps.weight"> : tensor<64x2048x1024xf16>
+                                  scf.yield %t : tensor<64x2048x1024xf16>
                                 }
-                                scf.yield %r14 : tensor<2048x1024x64xf16>
+                                scf.yield %r14 : tensor<64x2048x1024xf16>
                               }
-                              scf.yield %r13 : tensor<2048x1024x64xf16>
+                              scf.yield %r13 : tensor<64x2048x1024xf16>
                             }
-                            scf.yield %r12 : tensor<2048x1024x64xf16>
+                            scf.yield %r12 : tensor<64x2048x1024xf16>
                           }
-                          scf.yield %r11 : tensor<2048x1024x64xf16>
+                          scf.yield %r11 : tensor<64x2048x1024xf16>
                         }
-                        scf.yield %r10 : tensor<2048x1024x64xf16>
+                        scf.yield %r10 : tensor<64x2048x1024xf16>
                       }
-                      scf.yield %r9 : tensor<2048x1024x64xf16>
+                      scf.yield %r9 : tensor<64x2048x1024xf16>
                     }
-                    scf.yield %r8 : tensor<2048x1024x64xf16>
+                    scf.yield %r8 : tensor<64x2048x1024xf16>
                   }
-                  scf.yield %r7 : tensor<2048x1024x64xf16>
+                  scf.yield %r7 : tensor<64x2048x1024xf16>
                 }
-                scf.yield %r6 : tensor<2048x1024x64xf16>
+                scf.yield %r6 : tensor<64x2048x1024xf16>
               }
-              scf.yield %r5 : tensor<2048x1024x64xf16>
+              scf.yield %r5 : tensor<64x2048x1024xf16>
             }
-            scf.yield %r4 : tensor<2048x1024x64xf16>
+            scf.yield %r4 : tensor<64x2048x1024xf16>
           }
-          scf.yield %r3 : tensor<2048x1024x64xf16>
+          scf.yield %r3 : tensor<64x2048x1024xf16>
         }
-        scf.yield %r2 : tensor<2048x1024x64xf16>
+        scf.yield %r2 : tensor<64x2048x1024xf16>
       }
-      scf.yield %r1 : tensor<2048x1024x64xf16>
+      scf.yield %r1 : tensor<64x2048x1024xf16>
     }
-    %dyn = tensor.cast %w : tensor<2048x1024x64xf16> to tensor<?x?x?xf16>
+    %dyn = tensor.cast %w : tensor<64x2048x1024xf16> to tensor<?x?x?xf16>
     util.return %dyn : tensor<?x?x?xf16>
   }
 

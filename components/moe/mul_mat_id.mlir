@@ -20,7 +20,7 @@
 module @moe_components {
 
   util.func public @mul_mat_id(
-      %weights: tensor<?x?x?xf16>,      // Expert weights [n_out, n_in, n_expert]
+      %weights: tensor<?x?x?xf16>,      // Expert weights [n_expert, n_out, n_in] (pre-transposed)
       %input: tensor<?x?x?xf16>,        // Input [n_in, n_expert_used, n_tokens]
       %ids: tensor<?x?xi32>             // Expert indices [n_expert_used, n_tokens]
   ) -> tensor<?x?x?xf16> {              // Output [n_out, n_expert_used, n_tokens]
@@ -28,26 +28,15 @@ module @moe_components {
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
 
-    %n_out = tensor.dim %weights, %c0 : tensor<?x?x?xf16>
-    %n_in = tensor.dim %weights, %c1 : tensor<?x?x?xf16>
-    %n_expert = tensor.dim %weights, %c2 : tensor<?x?x?xf16>
+    %n_expert = tensor.dim %weights, %c0 : tensor<?x?x?xf16>
+    %n_out = tensor.dim %weights, %c1 : tensor<?x?x?xf16>
+    %n_in = tensor.dim %weights, %c2 : tensor<?x?x?xf16>
     %n_expert_used = tensor.dim %input, %c1 : tensor<?x?x?xf16>
     %n_tokens = tensor.dim %input, %c2 : tensor<?x?x?xf16>
 
-    // Step 1: Transpose expert weights to put expert dim first: [n_expert, n_out, n_in].
-    %weights_t_init = tensor.empty(%n_expert, %n_out, %n_in) : tensor<?x?x?xf16>
-    %weights_t = linalg.generic {
-      indexing_maps = [
-        affine_map<(d0, d1, d2) -> (d0, d1, d2)>,
-        affine_map<(d0, d1, d2) -> (d2, d0, d1)>
-      ],
-      iterator_types = ["parallel", "parallel", "parallel"]
-    } ins(%weights : tensor<?x?x?xf16>) outs(%weights_t_init : tensor<?x?x?xf16>) {
-    ^bb0(%in: f16, %out: f16):
-      linalg.yield %in : f16
-    } -> tensor<?x?x?xf16>
+    // Weights are already [n_expert, n_out, n_in] — no transpose needed.
 
-    // Step 2: Flatten indices for batched gather: [n_expert_used * n_tokens].
+    // Flatten indices for batched gather: [n_expert_used * n_tokens].
     %batch_size = arith.muli %n_expert_used, %n_tokens : index
     %ids_flat = tensor.collapse_shape %ids [[0, 1]]
       : tensor<?x?xi32> into tensor<?xi32>
@@ -56,7 +45,7 @@ module @moe_components {
     // Output: [n_expert_used * n_tokens, n_out, n_in].
     %gathered_init = tensor.empty(%batch_size, %n_out, %n_in) : tensor<?x?x?xf16>
     %weights_gathered = iree_linalg_ext.gather dimension_map = [0]
-      ins(%weights_t, %ids_flat : tensor<?x?x?xf16>, tensor<?xi32>)
+      ins(%weights, %ids_flat : tensor<?x?x?xf16>, tensor<?xi32>)
       outs(%gathered_init : tensor<?x?x?xf16>)
       -> tensor<?x?x?xf16>
 
