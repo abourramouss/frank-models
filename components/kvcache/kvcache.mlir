@@ -32,7 +32,7 @@
 //   scatter_decode(cache, layer, new_k, new_v, block_tables, positions) -> cache
 //   scatter_prefill(cache, layer, new_k, new_v, block_tables, start_positions, block_size) -> cache
 
-!elem_t = f32
+!elem_t = f16
 
 module @kvcache_components {
 

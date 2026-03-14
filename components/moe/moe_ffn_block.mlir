@@ -5,52 +5,37 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 // MoE FFN block with expert routing and mixture.
-// Reference: llama.cpp llama-graph.cpp:820-1084 (build_moe_ffn).
-//
-// Complete MoE flow:
-// 1. Router logits via gating network
-// 2. Softmax gating function
-// 3. Top-k expert selection
-// 4. Extract and optionally normalize expert weights
-// 5-7. Expert UP and GATE projections via mul_mat_id
-// 8. SwiGLU activation
-// 9. Expert DOWN projection via mul_mat_id
-// 10. Apply expert weights element-wise
-// 11. Sum expert outputs
-//
-// Each token independently routes to its top-k experts, enabling efficient batching.
+// Mixed precision: f16 data path, f32 router logits + softmax (overflow safety).
 
 module @moe_ffn_components {
 
   // External declarations - resolved by iree-link
   util.func private @moe_components.mul_mat_id(
-      tensor<?x?x?xf32>, tensor<?x?x?xf32>, tensor<?x?xi32>
-  ) -> tensor<?x?x?xf32>
+      tensor<?x?x?xf16>, tensor<?x?x?xf16>, tensor<?x?xi32>
+  ) -> tensor<?x?x?xf16>
 
   util.func private @activation_components.swiglu(
-      tensor<?x?x?xf32>, tensor<?x?x?xf32>
-  ) -> tensor<?x?x?xf32>
+      tensor<?x?x?xf16>, tensor<?x?x?xf16>
+  ) -> tensor<?x?x?xf16>
 
   util.func public @moe_ffn_block(
-      %input: tensor<?x?xf32>,          // [n_tokens, n_embd] (flattened batch*seq)
-      %gate_inp_w: tensor<?x?xf32>,     // Router weights [n_expert, n_embd]
-      %up_exps_w: tensor<?x?x?xf32>,    // Expert up [n_ff, n_embd, n_expert]
-      %gate_exps_w: tensor<?x?x?xf32>,  // Expert gate [n_ff, n_embd, n_expert]
-      %down_exps_w: tensor<?x?x?xf32>,  // Expert down [n_embd, n_ff, n_expert]
-      %n_expert: index,                  // Total experts (8 for Mixtral)
-      %n_expert_used: index,             // Top-k (2 for Mixtral)
+      %input: tensor<?x?xf16>,          // [n_tokens, n_embd] (flattened batch*seq)
+      %gate_inp_w: tensor<?x?xf16>,     // Router weights [n_expert, n_embd]
+      %up_exps_w: tensor<?x?x?xf16>,    // Expert up [n_ff, n_embd, n_expert]
+      %gate_exps_w: tensor<?x?x?xf16>,  // Expert gate [n_ff, n_embd, n_expert]
+      %down_exps_w: tensor<?x?x?xf16>,  // Expert down [n_embd, n_ff, n_expert]
+      %n_expert: index,
+      %n_expert_used: index,
       %n_embd: index,
       %n_ff: index,
-      %normalize_weights: i1             // Whether to normalize (false for Mixtral)
-  ) -> tensor<?x?xf32> {                 // [n_tokens, n_embd]
+      %normalize_weights: i1
+  ) -> tensor<?x?xf16> {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
-    %n_tokens = tensor.dim %input, %c0 : tensor<?x?xf32>
+    %n_tokens = tensor.dim %input, %c0 : tensor<?x?xf16>
 
-    // Step 1: Router logits: [n_expert, n_tokens].
-    // gate_inp_w @ input.T but matmul expects [M,K] @ [K,N] -> [M,N]
-    // gate_inp_w is [n_expert, n_embd], input.T is [n_embd, n_tokens]
-    // So we need input transposed. Use generic for transpose + matmul in one.
+    // Step 1: Router logits in f32 (for softmax numerical stability).
+    // Transpose input to f32.
     %input_t_init = tensor.empty(%n_embd, %n_tokens) : tensor<?x?xf32>
     %input_t = linalg.generic {
       indexing_maps = [
@@ -58,25 +43,38 @@ module @moe_ffn_components {
         affine_map<(d0, d1) -> (d0, d1)>
       ],
       iterator_types = ["parallel", "parallel"]
-    } ins(%input : tensor<?x?xf32>) outs(%input_t_init : tensor<?x?xf32>) {
-    ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
+    } ins(%input : tensor<?x?xf16>) outs(%input_t_init : tensor<?x?xf32>) {
+    ^bb0(%in: f16, %out: f32):
+      %v = arith.extf %in : f16 to f32
+      linalg.yield %v : f32
     } -> tensor<?x?xf32>
 
-    %zero = arith.constant 0.0 : f32
+    // Promote gate weights to f32 for router matmul.
+    %gate_inp_w_f32_init = tensor.empty(%n_expert, %n_embd) : tensor<?x?xf32>
+    %gate_inp_w_f32 = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1) -> (d0, d1)>,
+        affine_map<(d0, d1) -> (d0, d1)>
+      ],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%gate_inp_w : tensor<?x?xf16>) outs(%gate_inp_w_f32_init : tensor<?x?xf32>) {
+    ^bb0(%in: f16, %out: f32):
+      %v = arith.extf %in : f16 to f32
+      linalg.yield %v : f32
+    } -> tensor<?x?xf32>
+
+    %zero_f32 = arith.constant 0.0 : f32
     %logits_init = tensor.empty(%n_expert, %n_tokens) : tensor<?x?xf32>
-    %logits_filled = linalg.fill ins(%zero : f32) outs(%logits_init : tensor<?x?xf32>) -> tensor<?x?xf32>
-    %logits = linalg.matmul ins(%gate_inp_w, %input_t : tensor<?x?xf32>, tensor<?x?xf32>)
+    %logits_filled = linalg.fill ins(%zero_f32 : f32) outs(%logits_init : tensor<?x?xf32>) -> tensor<?x?xf32>
+    %logits = linalg.matmul ins(%gate_inp_w_f32, %input_t : tensor<?x?xf32>, tensor<?x?xf32>)
         outs(%logits_filled : tensor<?x?xf32>) -> tensor<?x?xf32>
 
-    // Step 2: Softmax gating function along expert dimension (dim 0).
+    // Step 2: Softmax in f32.
     %probs_init = tensor.empty(%n_expert, %n_tokens) : tensor<?x?xf32>
     %probs = linalg.softmax dimension(0) ins(%logits : tensor<?x?xf32>)
         outs(%probs_init : tensor<?x?xf32>) -> tensor<?x?xf32>
 
-    // Step 3: Top-k expert selection: returns weights and indices.
-    // %weights: [n_expert_used, n_tokens] (top-k probabilities)
-    // %selected_experts: [n_expert_used, n_tokens] (i32 indices)
+    // Step 3: Top-k expert selection (f32 probs).
     %weights_init = tensor.empty(%n_expert_used, %n_tokens) : tensor<?x?xf32>
     %indices_init = tensor.empty(%n_expert_used, %n_tokens) : tensor<?x?xi32>
     %weights, %selected_experts = iree_linalg_ext.topk
@@ -84,15 +82,14 @@ module @moe_ffn_components {
         ins(%probs : tensor<?x?xf32>)
         outs(%weights_init, %indices_init : tensor<?x?xf32>, tensor<?x?xi32>) {
       ^bb0(%lhs: f32, %rhs: f32):
-        %cmp = arith.cmpf ogt, %lhs, %rhs : f32  // Descending order.
+        %cmp = arith.cmpf ogt, %lhs, %rhs : f32
         iree_linalg_ext.yield %cmp : i1
     } -> tensor<?x?xf32>, tensor<?x?xi32>
 
-    // Step 4: Conditional weight normalization (sum normalization per token).
+    // Step 4: Conditional weight normalization (f32).
     %weights_normalized = scf.if %normalize_weights -> (tensor<?x?xf32>) {
-      // Sum weights across experts (dim 0) for each token.
       %sum_init = tensor.empty(%n_tokens) : tensor<?xf32>
-      %sum_filled = linalg.fill ins(%zero : f32) outs(%sum_init : tensor<?xf32>) -> tensor<?xf32>
+      %sum_filled = linalg.fill ins(%zero_f32 : f32) outs(%sum_init : tensor<?xf32>) -> tensor<?xf32>
 
       %weights_sum = linalg.generic {
         indexing_maps = [
@@ -106,7 +103,6 @@ module @moe_ffn_components {
         linalg.yield %sum : f32
       } -> tensor<?xf32>
 
-      // Normalize by dividing each weight by sum.
       %weights_norm_init = tensor.empty(%n_expert_used, %n_tokens) : tensor<?x?xf32>
       %weights_norm = linalg.generic {
         indexing_maps = [
@@ -127,41 +123,48 @@ module @moe_ffn_components {
       scf.yield %weights : tensor<?x?xf32>
     }
 
-    // Step 5: Reshape input for mul_mat_id.
-    // mul_mat_id expects [n_in, n_expert_used, n_tokens].
-    // We need to replicate input n_expert_used times along a new dimension.
-    // input is [n_tokens, n_embd], we want [n_embd, n_expert_used, n_tokens].
-    %input_replicated_init = tensor.empty(%n_embd, %n_expert_used, %n_tokens) : tensor<?x?x?xf32>
+    // Truncate weights to f16 for the data path.
+    %weights_f16_init = tensor.empty(%n_expert_used, %n_tokens) : tensor<?x?xf16>
+    %weights_f16 = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1) -> (d0, d1)>,
+        affine_map<(d0, d1) -> (d0, d1)>
+      ],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%weights_normalized : tensor<?x?xf32>) outs(%weights_f16_init : tensor<?x?xf16>) {
+    ^bb0(%in: f32, %out: f16):
+      %v = arith.truncf %in : f32 to f16
+      linalg.yield %v : f16
+    } -> tensor<?x?xf16>
+
+    // Step 5: Reshape input for mul_mat_id (f16).
+    %input_replicated_init = tensor.empty(%n_embd, %n_expert_used, %n_tokens) : tensor<?x?x?xf16>
     %input_replicated = linalg.generic {
       indexing_maps = [
-        affine_map<(d0, d1, d2) -> (d2, d0)>,  // input[n_tokens, n_embd] -> read [d2, d0]
-        affine_map<(d0, d1, d2) -> (d0, d1, d2)>  // output[n_embd, n_expert_used, n_tokens]
+        affine_map<(d0, d1, d2) -> (d2, d0)>,
+        affine_map<(d0, d1, d2) -> (d0, d1, d2)>
       ],
       iterator_types = ["parallel", "parallel", "parallel"]
-    } ins(%input : tensor<?x?xf32>) outs(%input_replicated_init : tensor<?x?x?xf32>) {
-    ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
-    } -> tensor<?x?x?xf32>
+    } ins(%input : tensor<?x?xf16>) outs(%input_replicated_init : tensor<?x?x?xf16>) {
+    ^bb0(%in: f16, %out: f16):
+      linalg.yield %in : f16
+    } -> tensor<?x?x?xf16>
 
-    // Step 6: Expert UP projection: [n_ff, n_expert_used, n_tokens].
+    // Steps 6-9: Expert projections and activation (all f16).
     %up = util.call @moe_components.mul_mat_id(%up_exps_w, %input_replicated, %selected_experts)
-        : (tensor<?x?x?xf32>, tensor<?x?x?xf32>, tensor<?x?xi32>) -> tensor<?x?x?xf32>
+        : (tensor<?x?x?xf16>, tensor<?x?x?xf16>, tensor<?x?xi32>) -> tensor<?x?x?xf16>
 
-    // Step 7: Expert GATE projection: [n_ff, n_expert_used, n_tokens].
     %gate = util.call @moe_components.mul_mat_id(%gate_exps_w, %input_replicated, %selected_experts)
-        : (tensor<?x?x?xf32>, tensor<?x?x?xf32>, tensor<?x?xi32>) -> tensor<?x?x?xf32>
+        : (tensor<?x?x?xf16>, tensor<?x?x?xf16>, tensor<?x?xi32>) -> tensor<?x?x?xf16>
 
-    // Step 8: SwiGLU activation: gate * silu(up).
     %activated = util.call @activation_components.swiglu(%gate, %up)
-        : (tensor<?x?x?xf32>, tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
+        : (tensor<?x?x?xf16>, tensor<?x?x?xf16>) -> tensor<?x?x?xf16>
 
-    // Step 9: Expert DOWN projection: [n_embd, n_expert_used, n_tokens].
     %experts_out = util.call @moe_components.mul_mat_id(%down_exps_w, %activated, %selected_experts)
-        : (tensor<?x?x?xf32>, tensor<?x?x?xf32>, tensor<?x?xi32>) -> tensor<?x?x?xf32>
+        : (tensor<?x?x?xf16>, tensor<?x?x?xf16>, tensor<?x?xi32>) -> tensor<?x?x?xf16>
 
-    // Step 10: Apply expert weights element-wise.
-    // Broadcast weights from [n_expert_used, n_tokens] to [n_embd, n_expert_used, n_tokens].
-    %experts_weighted_init = tensor.empty(%n_embd, %n_expert_used, %n_tokens) : tensor<?x?x?xf32>
+    // Step 10: Apply expert weights element-wise (f16).
+    %experts_weighted_init = tensor.empty(%n_embd, %n_expert_used, %n_tokens) : tensor<?x?x?xf16>
     %experts_weighted = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1, d2) -> (d0, d1, d2)>,
@@ -169,16 +172,17 @@ module @moe_ffn_components {
         affine_map<(d0, d1, d2) -> (d0, d1, d2)>
       ],
       iterator_types = ["parallel", "parallel", "parallel"]
-    } ins(%experts_out, %weights_normalized : tensor<?x?x?xf32>, tensor<?x?xf32>)
-      outs(%experts_weighted_init : tensor<?x?x?xf32>) {
-    ^bb0(%expert_val: f32, %weight: f32, %out: f32):
-      %weighted = arith.mulf %expert_val, %weight : f32
-      linalg.yield %weighted : f32
-    } -> tensor<?x?x?xf32>
+    } ins(%experts_out, %weights_f16 : tensor<?x?x?xf16>, tensor<?x?xf16>)
+      outs(%experts_weighted_init : tensor<?x?x?xf16>) {
+    ^bb0(%expert_val: f16, %weight: f16, %out: f16):
+      %weighted = arith.mulf %expert_val, %weight : f16
+      linalg.yield %weighted : f16
+    } -> tensor<?x?x?xf16>
 
-    // Step 11: Sum expert outputs across expert dimension (reduce dim 1).
-    %output_init = tensor.empty(%n_embd, %n_tokens) : tensor<?x?xf32>
-    %output_filled = linalg.fill ins(%zero : f32) outs(%output_init : tensor<?x?xf32>) -> tensor<?x?xf32>
+    // Step 11: Sum expert outputs (f16).
+    %zero_f16 = arith.constant 0.0 : f16
+    %output_init = tensor.empty(%n_embd, %n_tokens) : tensor<?x?xf16>
+    %output_filled = linalg.fill ins(%zero_f16 : f16) outs(%output_init : tensor<?x?xf16>) -> tensor<?x?xf16>
 
     %output_summed = linalg.generic {
       indexing_maps = [
@@ -186,26 +190,26 @@ module @moe_ffn_components {
         affine_map<(d0, d1, d2) -> (d0, d2)>
       ],
       iterator_types = ["parallel", "reduction", "parallel"]
-    } ins(%experts_weighted : tensor<?x?x?xf32>) outs(%output_filled : tensor<?x?xf32>) {
-    ^bb0(%expert_val: f32, %acc: f32):
-      %sum = arith.addf %expert_val, %acc : f32
-      linalg.yield %sum : f32
-    } -> tensor<?x?xf32>
+    } ins(%experts_weighted : tensor<?x?x?xf16>) outs(%output_filled : tensor<?x?xf16>) {
+    ^bb0(%expert_val: f16, %acc: f16):
+      %sum = arith.addf %expert_val, %acc : f16
+      linalg.yield %sum : f16
+    } -> tensor<?x?xf16>
 
     // Transpose back to [n_tokens, n_embd].
-    %final_init = tensor.empty(%n_tokens, %n_embd) : tensor<?x?xf32>
+    %final_init = tensor.empty(%n_tokens, %n_embd) : tensor<?x?xf16>
     %final = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d1, d0)>,
         affine_map<(d0, d1) -> (d0, d1)>
       ],
       iterator_types = ["parallel", "parallel"]
-    } ins(%output_summed : tensor<?x?xf32>) outs(%final_init : tensor<?x?xf32>) {
-    ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
-    } -> tensor<?x?xf32>
+    } ins(%output_summed : tensor<?x?xf16>) outs(%final_init : tensor<?x?xf16>) {
+    ^bb0(%in: f16, %out: f16):
+      linalg.yield %in : f16
+    } -> tensor<?x?xf16>
 
-    util.return %final : tensor<?x?xf32>
+    util.return %final : tensor<?x?xf16>
   }
 
 }

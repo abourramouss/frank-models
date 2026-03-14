@@ -42,26 +42,26 @@ module @llm_inference {
   util.func private @hparams.use_qk_norm() -> i1
 
   // ===== Model-level parameter imports (model_params module provides these) =====
-  util.func private @model_params.token_embd_weight() -> tensor<?x?xf32>
-  util.func private @model_params.output_norm_weight() -> tensor<?xf32>
-  util.func private @model_params.output_weight() -> tensor<?x?xf32>
+  util.func private @model_params.token_embd_weight() -> tensor<?x?xf16>
+  util.func private @model_params.output_norm_weight() -> tensor<?xf16>
+  util.func private @model_params.output_weight() -> tensor<?x?xf16>
 
   // ===== Component imports (resolved by iree-link) =====
   util.func private @embedding_components.embedding_lookup(
-      tensor<?x?xf32>,   // [vocab_size, n_embd]
+      tensor<?x?xf16>,   // [vocab_size, n_embd]
       tensor<?x?xi64>    // [batch, seq_len]
-  ) -> tensor<?x?x?xf32> // [batch, seq_len, n_embd]
+  ) -> tensor<?x?x?xf16> // [batch, seq_len, n_embd]
 
   util.func private @embedding_components.embedding_lookup_1d(
-      tensor<?x?xf32>,   // [vocab_size, n_embd]
+      tensor<?x?xf16>,   // [vocab_size, n_embd]
       tensor<?xi64>      // [batch]
-  ) -> tensor<?x?xf32>   // [batch, n_embd]
+  ) -> tensor<?x?xf16>   // [batch, n_embd]
 
   util.func private @rms_norm_components.rms_norm_linalg(
-      tensor<?x?xf32>,   // [n_tokens, hidden_dim]
-      tensor<?xf32>,      // [hidden_dim]
+      tensor<?x?xf16>,   // [n_tokens, hidden_dim]
+      tensor<?xf16>,      // [hidden_dim]
       f32                 // epsilon
-  ) -> tensor<?x?xf32>
+  ) -> tensor<?x?xf16>
 
   // KV cache
   util.func private @kvcache_components.allocate(
@@ -73,7 +73,7 @@ module @llm_inference {
 
   // Prefill transformer layer (scatters K/V to cache internally)
   util.func private @transformer_layer_moe_prefill_components.transformer_layer_moe_prefill(
-      tensor<?x?x?xf32>,   // input: [batch, seq_len, n_embd]
+      tensor<?x?x?xf16>,   // input: [batch, seq_len, n_embd]
       tensor<?x?xi64>,     // positions: [batch, seq_len]
       !util.list<?>,       // cache
       tensor<?x?x?xi32>,   // block_tables: [n_layers, batch, max_blocks]
@@ -92,12 +92,12 @@ module @llm_inference {
       i1,                  // use_bias
       i1,                  // normalize_weights
       i1                   // use_qk_norm
-  ) -> (tensor<?x?x?xf32>,     // output: [batch, seq_len, n_embd]
+  ) -> (tensor<?x?x?xf16>,     // output: [batch, seq_len, n_embd]
         !util.list<?>)         // cache_out with K/V written
 
   // Decode transformer layer
   util.func private @transformer_layer_moe_decode_components.transformer_layer_moe_decode(
-      tensor<?x?xf32>,         // input: [batch, n_embd]
+      tensor<?x?xf16>,         // input: [batch, n_embd]
       tensor<?xi64>,           // positions: [batch]
       !util.list<?>,           // cache
       tensor<?x?x?xi32>,       // block_tables: [n_layers, batch, max_blocks]
@@ -116,7 +116,7 @@ module @llm_inference {
       i1,                      // use_bias
       i1,                      // normalize_weights
       i1                       // use_qk_norm
-  ) -> (tensor<?x?xf32>,       // output: [batch, n_embd]
+  ) -> (tensor<?x?xf16>,       // output: [batch, n_embd]
         !util.list<?>)         // cache_out
 
   // ===== KV Cache Allocation =====
@@ -151,7 +151,7 @@ module @llm_inference {
       %block_tables: tensor<?x?x?xi32>,   // [n_layers, batch, max_blocks]
       %start_positions: tensor<?xi32>,    // [batch]
       %block_size: index
-  ) -> (tensor<?x?x?xf32>,                // logits: [batch, seq_len, vocab_size]
+  ) -> (tensor<?x?x?xf16>,                // logits: [batch, seq_len, vocab_size]
         !util.list<?>) {                  // cache_out
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
@@ -185,14 +185,14 @@ module @llm_inference {
     %seq_len = tensor.dim %tokens, %c1 : tensor<?x?xi64>
 
     // Token embedding lookup.
-    %tok_embd_weight = util.call @model_params.token_embd_weight() : () -> tensor<?x?xf32>
+    %tok_embd_weight = util.call @model_params.token_embd_weight() : () -> tensor<?x?xf16>
     %embeddings = util.call @embedding_components.embedding_lookup(%tok_embd_weight, %tokens)
-        : (tensor<?x?xf32>, tensor<?x?xi64>) -> tensor<?x?x?xf32>
+        : (tensor<?x?xf16>, tensor<?x?xi64>) -> tensor<?x?x?xf16>
 
     // Transformer layers loop (prefill variant with cache threading).
     %rope_freq_scale = arith.constant 1.0 : f32
     %final_hidden, %final_cache = scf.for %layer_idx = %c0 to %n_layer step %c1
-        iter_args(%hidden = %embeddings, %cache_iter = %cache) -> (tensor<?x?x?xf32>, !util.list<?>) {
+        iter_args(%hidden = %embeddings, %cache_iter = %cache) -> (tensor<?x?x?xf16>, !util.list<?>) {
       %layer_idx_i32 = arith.index_cast %layer_idx : index to i32
 
       %layer_out, %cache_updated = util.call @transformer_layer_moe_prefill_components.transformer_layer_moe_prefill(
@@ -203,40 +203,40 @@ module @llm_inference {
           %n_expert, %n_expert_used,
           %rms_eps, %rope_freq_base, %rope_freq_scale,
           %use_bias, %normalize_weights, %use_qk_norm)
-          : (tensor<?x?x?xf32>, tensor<?x?xi64>, !util.list<?>,
+          : (tensor<?x?x?xf16>, tensor<?x?xi64>, !util.list<?>,
              tensor<?x?x?xi32>, tensor<?xi32>, index,
              i32,
              index, index, index, index, index, index,
              f32, f32, f32, i1, i1, i1)
-          -> (tensor<?x?x?xf32>, !util.list<?>)
+          -> (tensor<?x?x?xf16>, !util.list<?>)
 
-      scf.yield %layer_out, %cache_updated : tensor<?x?x?xf32>, !util.list<?>
+      scf.yield %layer_out, %cache_updated : tensor<?x?x?xf16>, !util.list<?>
     }
 
     // Output normalization (operates on 2D: [batch*seq_len, n_embd]).
     %final_hidden_2d = tensor.collapse_shape %final_hidden [[0, 1], [2]]
-        : tensor<?x?x?xf32> into tensor<?x?xf32>
-    %output_norm_w = util.call @model_params.output_norm_weight() : () -> tensor<?xf32>
+        : tensor<?x?x?xf16> into tensor<?x?xf16>
+    %output_norm_w = util.call @model_params.output_norm_weight() : () -> tensor<?xf16>
     %normalized_2d = util.call @rms_norm_components.rms_norm_linalg(
         %final_hidden_2d, %output_norm_w, %rms_eps)
-        : (tensor<?x?xf32>, tensor<?xf32>, f32) -> tensor<?x?xf32>
+        : (tensor<?x?xf16>, tensor<?xf16>, f32) -> tensor<?x?xf16>
 
     // LM head projection: 2D matmul [batch*seq_len, n_embd] @ [n_embd, vocab] -> [batch*seq_len, vocab].
     // Using 2D matmul avoids shape inference issues with expand_shape on dynamic tensors.
-    %output_weight = util.call @model_params.output_weight() : () -> tensor<?x?xf32>
+    %output_weight = util.call @model_params.output_weight() : () -> tensor<?x?xf16>
     %n_tokens = arith.muli %batch, %seq_len : index
-    %logits_2d_empty = tensor.empty(%n_tokens, %n_vocab) : tensor<?x?xf32>
-    %zero = arith.constant 0.0 : f32
-    %logits_2d_init = linalg.fill ins(%zero : f32) outs(%logits_2d_empty : tensor<?x?xf32>) -> tensor<?x?xf32>
-    %logits_2d = linalg.matmul ins(%normalized_2d, %output_weight : tensor<?x?xf32>, tensor<?x?xf32>)
-        outs(%logits_2d_init : tensor<?x?xf32>) -> tensor<?x?xf32>
+    %logits_2d_empty = tensor.empty(%n_tokens, %n_vocab) : tensor<?x?xf16>
+    %zero = arith.constant 0.0 : f16
+    %logits_2d_init = linalg.fill ins(%zero : f16) outs(%logits_2d_empty : tensor<?x?xf16>) -> tensor<?x?xf16>
+    %logits_2d = linalg.matmul ins(%normalized_2d, %output_weight : tensor<?x?xf16>, tensor<?x?xf16>)
+        outs(%logits_2d_init : tensor<?x?xf16>) -> tensor<?x?xf16>
 
     // Reshape logits to [batch, seq_len, vocab].
     %logits = tensor.expand_shape %logits_2d [[0, 1], [2]]
         output_shape [%batch, %seq_len, %n_vocab]
-        : tensor<?x?xf32> into tensor<?x?x?xf32>
+        : tensor<?x?xf16> into tensor<?x?x?xf16>
 
-    util.return %logits, %final_cache : tensor<?x?x?xf32>, !util.list<?>
+    util.return %logits, %final_cache : tensor<?x?x?xf16>, !util.list<?>
   }
 
   // ===== Decode Entry Point =====
@@ -249,7 +249,7 @@ module @llm_inference {
       %block_tables: tensor<?x?x?xi32>,     // [n_layers, batch, max_blocks]
       %context_lens: tensor<?x?xi32>,       // [n_layers, batch]
       %max_context_len: index
-  ) -> (tensor<?x?xf32>,                    // logits: [batch, vocab_size]
+  ) -> (tensor<?x?xf16>,                    // logits: [batch, vocab_size]
         !util.list<?>) {                    // cache_out
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
@@ -282,14 +282,14 @@ module @llm_inference {
     %batch = tensor.dim %tokens, %c0 : tensor<?xi64>
 
     // Token embedding lookup (1D variant for decode).
-    %tok_embd_weight = util.call @model_params.token_embd_weight() : () -> tensor<?x?xf32>
+    %tok_embd_weight = util.call @model_params.token_embd_weight() : () -> tensor<?x?xf16>
     %embeddings = util.call @embedding_components.embedding_lookup_1d(%tok_embd_weight, %tokens)
-        : (tensor<?x?xf32>, tensor<?xi64>) -> tensor<?x?xf32>
+        : (tensor<?x?xf16>, tensor<?xi64>) -> tensor<?x?xf16>
 
     // Transformer layers loop (decode variant with cache threading).
     %rope_freq_scale = arith.constant 1.0 : f32
     %final_hidden, %final_cache = scf.for %layer_idx = %c0 to %n_layer step %c1
-        iter_args(%hidden = %embeddings, %cache_iter = %cache) -> (tensor<?x?xf32>, !util.list<?>) {
+        iter_args(%hidden = %embeddings, %cache_iter = %cache) -> (tensor<?x?xf16>, !util.list<?>) {
       %layer_idx_i32 = arith.index_cast %layer_idx : index to i32
 
       %layer_out, %cache_updated = util.call @transformer_layer_moe_decode_components.transformer_layer_moe_decode(
@@ -300,31 +300,31 @@ module @llm_inference {
           %n_expert, %n_expert_used,
           %rms_eps, %rope_freq_base, %rope_freq_scale,
           %use_bias_d, %normalize_weights_d, %use_qk_norm_d)
-          : (tensor<?x?xf32>, tensor<?xi64>, !util.list<?>,
+          : (tensor<?x?xf16>, tensor<?xi64>, !util.list<?>,
              tensor<?x?x?xi32>, tensor<?x?xi32>, index,
              i32,
              index, index, index, index, index, index,
              f32, f32, f32, i1, i1, i1)
-          -> (tensor<?x?xf32>, !util.list<?>)
+          -> (tensor<?x?xf16>, !util.list<?>)
 
-      scf.yield %layer_out, %cache_updated : tensor<?x?xf32>, !util.list<?>
+      scf.yield %layer_out, %cache_updated : tensor<?x?xf16>, !util.list<?>
     }
 
     // Output normalization.
-    %output_norm_w = util.call @model_params.output_norm_weight() : () -> tensor<?xf32>
+    %output_norm_w = util.call @model_params.output_norm_weight() : () -> tensor<?xf16>
     %normalized = util.call @rms_norm_components.rms_norm_linalg(
         %final_hidden, %output_norm_w, %rms_eps)
-        : (tensor<?x?xf32>, tensor<?xf32>, f32) -> tensor<?x?xf32>
+        : (tensor<?x?xf16>, tensor<?xf16>, f32) -> tensor<?x?xf16>
 
     // LM head projection: [batch, n_embd] @ [n_embd, vocab] -> [batch, vocab].
-    %output_weight = util.call @model_params.output_weight() : () -> tensor<?x?xf32>
-    %logits_empty = tensor.empty(%batch, %n_vocab) : tensor<?x?xf32>
-    %zero = arith.constant 0.0 : f32
-    %logits_init = linalg.fill ins(%zero : f32) outs(%logits_empty : tensor<?x?xf32>) -> tensor<?x?xf32>
-    %logits = linalg.matmul ins(%normalized, %output_weight : tensor<?x?xf32>, tensor<?x?xf32>)
-        outs(%logits_init : tensor<?x?xf32>) -> tensor<?x?xf32>
+    %output_weight = util.call @model_params.output_weight() : () -> tensor<?x?xf16>
+    %logits_empty = tensor.empty(%batch, %n_vocab) : tensor<?x?xf16>
+    %zero = arith.constant 0.0 : f16
+    %logits_init = linalg.fill ins(%zero : f16) outs(%logits_empty : tensor<?x?xf16>) -> tensor<?x?xf16>
+    %logits = linalg.matmul ins(%normalized, %output_weight : tensor<?x?xf16>, tensor<?x?xf16>)
+        outs(%logits_init : tensor<?x?xf16>) -> tensor<?x?xf16>
 
-    util.return %logits, %final_cache : tensor<?x?xf32>, !util.list<?>
+    util.return %logits, %final_cache : tensor<?x?xf16>, !util.list<?>
   }
 
 }

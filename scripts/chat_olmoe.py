@@ -314,10 +314,12 @@ def generate(
     token_ids: list[int],
     max_new_tokens: int = 256,
     eos_token: int = EOS_TOKEN,
+    tokenizer=None,
 ) -> list[int]:
     """Run greedy autoregressive generation on *token_ids*.
 
     Returns the list of generated token ids (excluding the prompt).
+    If tokenizer is provided, streams tokens to stdout as they are generated.
     """
     cfg = model.cfg
     n_layers = cfg["n_layers"]
@@ -378,6 +380,12 @@ def generate(
     for step in range(max_new_tokens):
         generated.append(next_token)
 
+        # Stream token to stdout
+        if tokenizer is not None:
+            token_text = tokenizer.decode([next_token])
+            sys.stdout.write(token_text)
+            sys.stdout.flush()
+
         if next_token == eos_token:
             break
 
@@ -398,6 +406,10 @@ def generate(
         # decode_logits shape: [batch, vocab_size]
         next_token = int(np.argmax(decode_logits[0, :]))
         cur_pos += 1
+
+    if tokenizer is not None:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
 
     return generated
 
@@ -439,15 +451,11 @@ def chat_loop(
 
         # Generate
         t0 = time.time()
-        generated_ids = generate(model, token_ids, max_new_tokens=max_tokens)
+        generated_ids = generate(model, token_ids, max_new_tokens=max_tokens, tokenizer=tokenizer)
         elapsed = time.time() - t0
 
-        # Decode output tokens
-        output_text = tokenizer.decode(generated_ids)
         n_gen = len(generated_ids)
         tps = n_gen / elapsed if elapsed > 0 else 0
-
-        print(output_text)
         print(f"[{n_gen} tokens in {elapsed:.1f}s, {tps:.1f} tok/s]")
         sys.stdout.flush()
 
@@ -557,4 +565,7 @@ def main():
 
 
 if __name__ == "__main__":
+    import signal
+    signal.signal(signal.SIGINT, lambda *_: (print("\nBye!"), os._exit(0)))
+    import os
     main()
