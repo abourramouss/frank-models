@@ -119,7 +119,10 @@ module @llm_inference {
       f32,                     // rope_freq_scale
       i1,                      // use_bias
       i1,                      // normalize_weights
-      i1                       // use_qk_norm
+      i1,                      // use_qk_norm
+      index,                   // logical_block
+      index,                   // pos_in_block
+      index                    // max_blocks_per_seq
   ) -> (tensor<?x?xf16>,       // output: [batch, n_embd]
         tensor<?x?x?x?xf16>,   // k_cache_out
         tensor<?x?x?x?xf16>)   // v_cache_out
@@ -268,7 +271,10 @@ module @llm_inference {
       %v_cache: tensor<?x?x?x?xf16>,       // V cache
       %block_tables: tensor<?x?x?xi32>,     // [n_layers, batch, max_blocks]
       %context_lens: tensor<?x?xi32>,       // [n_layers, batch]
-      %max_context_len: index
+      %max_context_len: index,
+      %logical_block: index,                // position // block_size (precomputed on host)
+      %pos_in_block: index,                 // position % block_size (precomputed on host)
+      %max_blocks_per_seq: index            // max blocks per sequence for physical block calc
   ) -> (tensor<?x?xf16>,                    // logits: [batch, vocab_size]
         tensor<?x?x?x?xf16>,               // k_cache_out
         tensor<?x?x?x?xf16>) {             // v_cache_out
@@ -329,12 +335,14 @@ module @llm_inference {
           %n_head, %n_head_kv, %n_embd, %n_ff,
           %n_expert, %n_expert_used,
           %rms_eps, %rope_freq_base, %rope_freq_scale,
-          %use_bias_d, %normalize_weights_d, %use_qk_norm_d)
+          %use_bias_d, %normalize_weights_d, %use_qk_norm_d,
+          %logical_block, %pos_in_block, %max_blocks_per_seq)
           : (tensor<?x?xf16>, tensor<?xi64>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>,
              tensor<?x?x?xi32>, tensor<?x?xi32>, index,
              i32,
              index, index, index, index, index, index,
-             f32, f32, f32, i1, i1, i1)
+             f32, f32, f32, i1, i1, i1,
+             index, index, index)
           -> (tensor<?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
 
       // Re-tie cache shapes.

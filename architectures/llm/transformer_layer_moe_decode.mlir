@@ -13,7 +13,8 @@
 //
 // Integrates with unified paged KV cache. All layers share the same physical block pool.
 // Layer-aware metadata (block_tables, context_lens) has layer dimension sliced internally
-// by gather/scatter.
+// by gather. Scatter uses precomputed scalar indices (logical_block, pos_in_block,
+// max_blocks_per_seq) to compute the physical block per layer without tensor.extract.
 //
 // Logical shapes:
 //   input:           [batch, n_embd]               - Single token hidden state per sequence
@@ -81,14 +82,14 @@ module @transformer_layer_moe_decode_components {
         tensor<?x?x?x?xf16>)   // v_gathered: [batch, max_ctx, n_head_kv, head_dim]
 
   // KV cache: scatter new K/V for a specific layer (decode: single token)
+  // Takes precomputed target_block and pos_in_block as scalar indices.
   util.func private @kvcache_components.scatter_decode(
       tensor<?x?x?x?xf16>,      // k_cache
       tensor<?x?x?x?xf16>,      // v_cache
-      index,                     // layer
       tensor<?x?x?xf16>,        // new_k: [batch, n_head_kv, head_dim]
       tensor<?x?x?xf16>,        // new_v: [batch, n_head_kv, head_dim]
-      tensor<?x?x?xi32>,        // block_tables: [n_layers, batch, max_blocks]
-      tensor<?xi64>             // positions: [batch]
+      index,                     // target_block: precomputed physical block index
+      index                      // pos_in_block: precomputed position within block
   ) -> (tensor<?x?x?x?xf16>,   // k_cache_out
         tensor<?x?x?x?xf16>)   // v_cache_out
 
@@ -155,7 +156,10 @@ module @transformer_layer_moe_decode_components {
       %rope_freq_scale: f32,
       %use_bias: i1,
       %normalize_weights: i1,
-      %use_qk_norm: i1
+      %use_qk_norm: i1,
+      %logical_block: index,               // position // block_size (same for all layers)
+      %pos_in_block: index,                 // position % block_size (same for all layers)
+      %max_blocks_per_seq: index            // max_blocks_per_seq for physical block computation
   ) -> (tensor<?x?xf16>,                    // output: [batch, n_embd]
         tensor<?x?x?x?xf16>,               // k_cache_out
         tensor<?x?x?x?xf16>) {             // v_cache_out
@@ -218,11 +222,16 @@ module @transformer_layer_moe_decode_components {
            i1, tensor<?xf16>, tensor<?xf16>, f32)
         -> (tensor<?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>)
 
-    // Scatter new K/V to cache.
+    // Compute physical block for this layer: physical_block = layer * max_blocks_per_seq + logical_block.
+    // (batch=1, so layer stride is just max_blocks_per_seq)
+    %layer_offset = arith.muli %layer, %max_blocks_per_seq : index
+    %physical_block = arith.addi %layer_offset, %logical_block : index
+
+    // Scatter new K/V to cache using precomputed physical block and position.
     %k_cache_updated, %v_cache_updated = util.call @kvcache_components.scatter_decode(
-        %k_cache, %v_cache, %layer, %k_new, %v_new, %block_tables, %positions)
-        : (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>, index, tensor<?x?x?xf16>, tensor<?x?x?xf16>,
-           tensor<?x?x?xi32>, tensor<?xi64>)
+        %k_cache, %v_cache, %k_new, %v_new, %physical_block, %pos_in_block)
+        : (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>,
+           index, index)
         -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
 
     // Residual connection: input + attn_out.

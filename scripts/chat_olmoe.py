@@ -295,10 +295,13 @@ class OLMoEChat:
         block_tables: np.ndarray,
         context_lens: np.ndarray,
         max_context_len: int,
+        logical_block: int,
+        pos_in_block: int,
+        max_blocks_per_seq: int,
     ) -> tuple[np.ndarray, tuple]:
         k_cache, v_cache = cache
         func = self._vm_module.lookup_function("decode")
-        args = VmVariantList(7)
+        args = VmVariantList(10)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
         args.push_ref(k_cache)
@@ -306,6 +309,9 @@ class OLMoEChat:
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(context_lens))
         args.push_int(max_context_len)
+        args.push_int(logical_block)
+        args.push_int(pos_in_block)
+        args.push_int(max_blocks_per_seq)
         results = VmVariantList(3)
         self._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
@@ -374,9 +380,14 @@ def generate(
         context_lens = np.full((n_layers, batch), i, dtype=np.int32)
         max_ctx = i
 
+        # Precompute scatter indices on host to avoid device->host staging transfers
+        logical_blk = i // block_size
+        pos_in_blk = i % block_size
+
         decode_logits, cache = model.decode(
             decode_token, decode_pos, cache, block_tables,
             context_lens, max_ctx,
+            logical_blk, pos_in_blk, max_blocks_per_seq,
         )
         last_logits = decode_logits[0, :]
 
@@ -403,6 +414,10 @@ def generate(
         context_lens = np.full((n_layers, batch), cur_pos, dtype=np.int32)
         max_ctx = cur_pos
 
+        # Precompute scatter indices on host to avoid device->host staging transfers
+        logical_blk = cur_pos // block_size
+        pos_in_blk = cur_pos % block_size
+
         decode_logits, cache = model.decode(
             decode_token,
             decode_pos,
@@ -410,6 +425,9 @@ def generate(
             block_tables,
             context_lens,
             max_ctx,
+            logical_blk,
+            pos_in_blk,
+            max_blocks_per_seq,
         )
         # decode_logits shape: [batch, vocab_size]
         next_token = int(np.argmax(decode_logits[0, :]))

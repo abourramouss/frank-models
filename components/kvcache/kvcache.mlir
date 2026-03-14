@@ -130,42 +130,20 @@ module @kvcache_components {
   }
 
   // Scatter one new token per sequence (decode phase).
-  // Uses linalg.generic over the entire cache — only modifies the target slot.
-  // For batch=1: one position is written, rest pass through unchanged.
-  // This is a single parallel GPU kernel with no scf.for.
+  // Takes precomputed target_block and pos_in_block as scalar args to avoid
+  // device->host staging transfers from tensor.extract on positions/block_tables.
   util.func public @scatter_decode(
       %k_cache: tensor<?x?x?x?x!elem_t>,
       %v_cache: tensor<?x?x?x?x!elem_t>,
-      %layer: index,
       %new_k: tensor<?x?x?x!elem_t>,       // [batch, n_head_kv, head_dim]
       %new_v: tensor<?x?x?x!elem_t>,
-      %block_tables: tensor<?x?x?xi32>,
-      %positions: tensor<?xi64>
+      %target_block: index,                  // precomputed physical block index
+      %pos_in_block: index                   // precomputed position within block
   ) -> (tensor<?x?x?x?x!elem_t>, tensor<?x?x?x?x!elem_t>) {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
 
-    %batch_size = tensor.dim %new_k, %c0 : tensor<?x?x?x!elem_t>
-
-    %max_blocks = tensor.dim %block_tables, %c2 : tensor<?x?x?xi32>
-    %block_tables_layer = tensor.extract_slice %block_tables[%layer, 0, 0] [1, %batch_size, %max_blocks] [1, 1, 1]
-      : tensor<?x?x?xi32> to tensor<1x?x?xi32>
-    %block_tables_2d = tensor.collapse_shape %block_tables_layer [[0, 1], [2]]
-      : tensor<1x?x?xi32> into tensor<?x?xi32>
-
-    %block_size = tensor.dim %k_cache, %c1 : tensor<?x?x?x?x!elem_t>
-
-    // For batch=1 decode: compute target physical block and position.
-    // We extract batch=0's position and block mapping.
-    %abs_pos_i64 = tensor.extract %positions[%c0] : tensor<?xi64>
-    %abs_pos = arith.index_cast %abs_pos_i64 : i64 to index
-    %logical_block = arith.divui %abs_pos, %block_size : index
-    %pos_in_block = arith.remui %abs_pos, %block_size : index
-    %physical_block_i32 = tensor.extract %block_tables_2d[%c0, %logical_block] : tensor<?x?xi32>
-    %target_block = arith.index_cast %physical_block_i32 : i32 to index
-
-    // Extract new_k[0, :, :] as [1, n_head_kv, head_dim] for insert_slice.
     %n_head_kv = tensor.dim %new_k, %c1 : tensor<?x?x?x!elem_t>
     %head_dim = tensor.dim %new_k, %c2 : tensor<?x?x?x!elem_t>
     %new_k_slice = tensor.extract_slice %new_k[0, 0, 0] [1, %n_head_kv, %head_dim] [1, 1, 1]

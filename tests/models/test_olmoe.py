@@ -189,15 +189,18 @@ class OLMoERunner:
         return logits, cache_out
 
     def decode(self, tokens, positions, cache, block_tables, context_lens,
-               max_context_len):
+               max_context_len, logical_block, pos_in_block, max_blocks_per_seq):
         func = self._model.lookup_function("decode")
-        args = VmVariantList(6)
+        args = VmVariantList(10)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
         args.push_list(cache)
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(context_lens))
         args.push_int(max_context_len)
+        args.push_int(logical_block)
+        args.push_int(pos_in_block)
+        args.push_int(max_blocks_per_seq)
         results = VmVariantList(2)
         self._model._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
@@ -297,8 +300,13 @@ class TestOLMoEPrefill:
         )                                                        # [n_layers, batch]
         max_ctx = prefill_len
 
+        # Precompute scatter indices for decode
+        logical_blk = prefill_len // block_size
+        pos_in_blk = prefill_len % block_size
+
         decode_logits, _ = runner.decode(
             decode_token, decode_pos, cache, block_tables,
             context_lens, max_ctx,
+            logical_blk, pos_in_blk, max_blocks,
         )
         assert decode_logits.shape == (batch, cfg["vocab_size"])

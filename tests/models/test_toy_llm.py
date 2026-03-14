@@ -228,16 +228,22 @@ class ToyModelRunner:
         block_tables: np.ndarray,
         context_lens: np.ndarray,
         max_context_len: int,
+        logical_block: int,
+        pos_in_block: int,
+        max_blocks_per_seq: int,
     ) -> tuple[np.ndarray, VmVariantList]:
         """Run decode step, returns (logits, updated_cache)."""
         func = self._model.lookup_function("decode")
-        arg_list = VmVariantList(6)
+        arg_list = VmVariantList(10)
         arg_list.push_ref(self._numpy_to_buffer_view(tokens))
         arg_list.push_ref(self._numpy_to_buffer_view(positions))
         arg_list.push_list(cache)
         arg_list.push_ref(self._numpy_to_buffer_view(block_tables))
         arg_list.push_ref(self._numpy_to_buffer_view(context_lens))
         arg_list.push_int(max_context_len)
+        arg_list.push_int(logical_block)
+        arg_list.push_int(pos_in_block)
+        arg_list.push_int(max_blocks_per_seq)
 
         result_list = VmVariantList(2)
         self._model._context.invoke(func, arg_list, result_list)
@@ -368,6 +374,10 @@ class TestToyModelPrefill:
         context_lens = np.full((n_layers, batch), prefill_len, dtype=np.int32)
         max_context_len = prefill_len  # Equals context_lens; decode concat adds +1
 
+        # Precompute scatter indices for decode
+        logical_blk = prefill_len // block_size
+        pos_in_blk = prefill_len % block_size
+
         decode_logits, cache_out = compiled_model.decode(
             decode_tokens,
             decode_positions,
@@ -375,6 +385,9 @@ class TestToyModelPrefill:
             block_tables,
             context_lens,
             max_context_len,
+            logical_blk,
+            pos_in_blk,
+            max_blocks_per_seq,
         )
 
         # Verify decode output shape

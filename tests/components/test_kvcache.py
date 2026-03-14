@@ -13,7 +13,7 @@ Layer-aware metadata:
 Interface:
   allocate(n_blocks, block_size, n_head_kv, head_dim) -> cache
   gather(cache, layer, block_tables, context_lens, max_context_len) -> (K, V)
-  scatter_decode(cache, layer, new_k, new_v, block_tables, positions) -> cache
+  scatter_decode(cache, new_k, new_v, target_block, pos_in_block) -> cache
   scatter_prefill(cache, layer, new_k, new_v, block_tables, start_positions, block_size) -> cache
 
 NOTE: scatter_prefill assumes uniform sequence lengths (all sequences have the same
@@ -34,27 +34,22 @@ from oracles.kvcache import (
 
 
 def _scatter_decode_call(module, cache, layer, new_k, new_v, block_indices, pos_in_blocks, n_blocks, block_size):
-    """Call scatter_decode using the (block_tables, positions) API.
+    """Call scatter_decode using precomputed (target_block, pos_in_block) scalars.
 
-    Converts legacy (block_indices[batch], pos_in_blocks[batch]) to the new API:
-      positions[i] = block_indices[i] * block_size + pos_in_blocks[i]
-      block_tables = [1, batch, n_blocks] identity mapping (physical == logical)
+    Takes legacy (block_indices[batch], pos_in_blocks[batch]) and passes
+    the first element as scalar target_block and pos_in_block indices.
+    (Only supports batch=1 with the new scalar API.)
     """
-    batch = len(block_indices)
-    positions = (np.asarray(block_indices, dtype=np.int64) * block_size
-                 + np.asarray(pos_in_blocks, dtype=np.int64))
-    block_tables = np.tile(
-        np.arange(n_blocks, dtype=np.int32), (1, batch, 1)
-    )  # [1, batch, n_blocks]
+    target_block = int(block_indices[0])
+    pos_in_block = int(pos_in_blocks[0])
 
     scatter_func = module.lookup_function("scatter_decode")
-    args = VmVariantList(6)
+    args = VmVariantList(5)
     args.push_list(cache)
-    args.push_int(layer)
     args.push_ref(module._numpy_to_buffer_view(new_k))
     args.push_ref(module._numpy_to_buffer_view(new_v))
-    args.push_ref(module._numpy_to_buffer_view(block_tables))
-    args.push_ref(module._numpy_to_buffer_view(positions))
+    args.push_int(target_block)
+    args.push_int(pos_in_block)
     results = VmVariantList(1)
     module._context.invoke(scatter_func, args, results)
     return results.get_as_list(0)
@@ -287,22 +282,14 @@ class TestScatterDecode:
     """Tests for scatter_decode operation (one token per sequence)."""
 
     def test_basic(self, kvcache_module):
-        """Test basic scatter with one token per sequence."""
+        """Test basic scatter with one token (batch=1, scalar indices)."""
         np.random.seed(42)
         n_blocks, block_size, n_head_kv, head_dim = 8, 4, 2, 8
-        batch_size = 3
+        batch_size = 1
         layer = 0
 
-        # Each sequence writes to a different block at a different position.
-        # Using new API: positions = block_idx * block_size + pos_in_block
-        block_indices = np.array([0, 2, 5], dtype=np.int32)
-        pos_in_blocks = np.array([3, 1, 0], dtype=np.int32)
-        positions = (block_indices.astype(np.int64) * block_size
-                     + pos_in_blocks.astype(np.int64))
-        # Identity block_tables: physical block j == logical block j
-        block_tables = np.tile(
-            np.arange(n_blocks, dtype=np.int32), (1, batch_size, 1)
-        )  # [1, batch, n_blocks]
+        target_block = 2
+        pos_in_block = 3
 
         # Allocate cache
         alloc_args = VmVariantList(4)
@@ -315,19 +302,18 @@ class TestScatterDecode:
         kvcache_module._context.invoke(alloc_func, alloc_args, alloc_results)
         cache = alloc_results.get_as_list(0)
 
-        # Create new K/V data [batch, n_head_kv, head_dim] - ONE token per sequence
+        # Create new K/V data [batch=1, n_head_kv, head_dim]
         new_k = np.random.randn(batch_size, n_head_kv, head_dim).astype(np.float32)
         new_v = np.random.randn(batch_size, n_head_kv, head_dim).astype(np.float32)
 
-        # Scatter using new API
+        # Scatter using new scalar API (target_block, pos_in_block)
         scatter_func = kvcache_module.lookup_function("scatter_decode")
-        scatter_args = VmVariantList(6)
+        scatter_args = VmVariantList(5)
         scatter_args.push_list(cache)
-        scatter_args.push_int(layer)
         scatter_args.push_ref(kvcache_module._numpy_to_buffer_view(new_k))
         scatter_args.push_ref(kvcache_module._numpy_to_buffer_view(new_v))
-        scatter_args.push_ref(kvcache_module._numpy_to_buffer_view(block_tables))
-        scatter_args.push_ref(kvcache_module._numpy_to_buffer_view(positions))
+        scatter_args.push_int(target_block)
+        scatter_args.push_int(pos_in_block)
         scatter_results = VmVariantList(1)
         kvcache_module._context.invoke(scatter_func, scatter_args, scatter_results)
 
@@ -340,16 +326,14 @@ class TestScatterDecode:
             updated_cache.get_as_object(1, HalBufferView)
         )
 
-        # Oracle
+        # Oracle: manually place into the expected location
         k_cache_init, v_cache_init = allocate_oracle(
             n_blocks, block_size, n_head_kv, head_dim
         )
-        k_expected = scatter_decode_oracle(
-            k_cache_init, layer, new_k, block_tables, positions
-        )
-        v_expected = scatter_decode_oracle(
-            v_cache_init, layer, new_v, block_tables, positions
-        )
+        k_expected = k_cache_init.copy()
+        k_expected[target_block, pos_in_block, :, :] = new_k[0]
+        v_expected = v_cache_init.copy()
+        v_expected[target_block, pos_in_block, :, :] = new_v[0]
 
         assert_close(k_updated, k_expected)
         assert_close(v_updated, v_expected)

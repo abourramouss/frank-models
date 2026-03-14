@@ -187,15 +187,19 @@ class OLMoERunner:
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
         return logits, results.get_as_list(1)
 
-    def decode(self, token, position, cache, block_tables, context_lens, max_context_len):
+    def decode(self, token, position, cache, block_tables, context_lens,
+               max_context_len, logical_block, pos_in_block, max_blocks_per_seq):
         func = self._mod.lookup_function("decode")
-        args = VmVariantList(6)
+        args = VmVariantList(10)
         args.push_ref(self._to_bv(token))
         args.push_ref(self._to_bv(position))
         args.push_list(cache)
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(context_lens))
         args.push_int(max_context_len)
+        args.push_int(logical_block)
+        args.push_int(pos_in_block)
+        args.push_int(max_blocks_per_seq)
         results = VmVariantList(2)
         self._ctx.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
@@ -250,7 +254,10 @@ def generate(prompt: str, max_new_tokens: int = 100, eos_token_id: int = 50279) 
         position = np.array([pos], dtype=np.int64)             # [1]
         context_lens = np.full((N_LAYERS, 1), pos, dtype=np.int32)  # [n_layers, 1]
 
-        logits, cache = runner.decode(tok, position, cache, block_tables, context_lens, pos)
+        logical_blk = pos // BLOCK_SIZE
+        pos_in_blk = pos % BLOCK_SIZE
+        logits, cache = runner.decode(tok, position, cache, block_tables, context_lens, pos,
+                                      logical_blk, pos_in_blk, blocks_per_seq)
         next_token = int(np.argmax(logits[0]))
         generated.append(next_token)
         print(f"  step {step+1} -> token {next_token}")
