@@ -251,59 +251,67 @@ class OLMoEChat:
 
     # -- Model entry points --
 
-    def allocate_kv_cache(self, n_blocks: int) -> VmVariantList:
+    def allocate_kv_cache(self, n_blocks: int) -> tuple:
         func = self._vm_module.lookup_function("allocate_kv_cache")
         args = VmVariantList(2)
         args.push_int(n_blocks)
         args.push_int(self.block_size)
-        results = VmVariantList(1)
+        results = VmVariantList(2)
         self._context.invoke(func, args, results)
-        return results.get_as_list(0)
+        k_cache = results.get_as_object(0, HalBufferView)
+        v_cache = results.get_as_object(1, HalBufferView)
+        return (k_cache, v_cache)
 
     def prefill(
         self,
         tokens: np.ndarray,
         positions: np.ndarray,
-        cache: VmVariantList,
+        cache: tuple,
         block_tables: np.ndarray,
         start_positions: np.ndarray,
-    ) -> tuple[np.ndarray, VmVariantList]:
+    ) -> tuple[np.ndarray, tuple]:
+        k_cache, v_cache = cache
         func = self._vm_module.lookup_function("prefill")
-        args = VmVariantList(6)
+        args = VmVariantList(7)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
-        args.push_list(cache)
+        args.push_ref(k_cache)
+        args.push_ref(v_cache)
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(start_positions))
         args.push_int(self.block_size)
-        results = VmVariantList(2)
+        results = VmVariantList(3)
         self._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
-        cache_out = results.get_as_list(1)
-        return logits, cache_out
+        k_out = results.get_as_object(1, HalBufferView)
+        v_out = results.get_as_object(2, HalBufferView)
+        return logits, (k_out, v_out)
 
     def decode(
         self,
         tokens: np.ndarray,
         positions: np.ndarray,
-        cache: VmVariantList,
+        cache: tuple,
         block_tables: np.ndarray,
         context_lens: np.ndarray,
         max_context_len: int,
-    ) -> tuple[np.ndarray, VmVariantList]:
+    ) -> tuple[np.ndarray, tuple]:
+        k_cache, v_cache = cache
         func = self._vm_module.lookup_function("decode")
-        args = VmVariantList(6)
+        args = VmVariantList(7)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
-        args.push_list(cache)
+        args.push_ref(k_cache)
+        args.push_ref(v_cache)
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(context_lens))
         args.push_int(max_context_len)
-        results = VmVariantList(2)
+        results = VmVariantList(3)
         self._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
-        cache_out = results.get_as_list(1)
-        return logits, cache_out
+        k_out = results.get_as_object(1, HalBufferView)
+        v_out = results.get_as_object(2, HalBufferView)
+        return logits, (k_out, v_out)
 
 
 # ---------------------------------------------------------------------------
