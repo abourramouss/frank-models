@@ -29,7 +29,7 @@
 // Interface:
 //   allocate(n_blocks, block_size, n_head_kv, head_dim) -> cache
 //   gather(cache, layer, block_tables, context_lens, max_context_len) -> (K, V)
-//   scatter_decode(cache, layer, new_k, new_v, block_tables, positions) -> cache
+//   scatter_decode(cache, layer, new_k, new_v, target_block, pos_in_block) -> cache
 //   scatter_prefill(cache, layer, new_k, new_v, block_tables, start_positions, block_size) -> cache
 
 !elem_t = f16
@@ -237,9 +237,15 @@ module @kvcache_components {
 
   // Scatter one new token per sequence to paged cache (decode phase).
   //
-  // Uses block_tables to resolve physical blocks per layer (same as gather and
-  // scatter_prefill). Computes logical block and position from the absolute
-  // token positions.
+  // Scalar scatter optimization: takes precomputed physical block index and
+  // position-in-block as scalar index args instead of device tensors.
+  // This eliminates device->host staging transfers that were needed to
+  // extract values from block_tables and positions tensors.
+  //
+  // The caller (transformer layer) computes:
+  //   physical_block = layer * max_blocks_per_seq + logical_block
+  //   where logical_block = cur_pos // block_size
+  //   and   pos_in_block  = cur_pos % block_size
   //
   // Logical shapes:
   //   cache:           !util.list<?> containing K_blocks, V_blocks
@@ -248,8 +254,8 @@ module @kvcache_components {
   //   layer:           index - which transformer layer (0 to n_layers-1)
   //   new_k:           [batch, n_head_kv, head_dim] - one K vector per sequence
   //   new_v:           [batch, n_head_kv, head_dim] - one V vector per sequence
-  //   block_tables:    [n_layers, batch, max_blocks_per_seq] i32 - block indirection
-  //   positions:       [batch] i64 - absolute position for each sequence
+  //   target_block:    index - precomputed physical block index
+  //   pos_in_block:    index - position within the block
   //
   // Returns:
   //   Updated cache object
@@ -258,24 +264,16 @@ module @kvcache_components {
       %layer: index,
       %new_k: tensor<?x?x?x!elem_t>,
       %new_v: tensor<?x?x?x!elem_t>,
-      %block_tables: tensor<?x?x?xi32>,
-      %positions: tensor<?xi64>
+      %target_block: index,
+      %pos_in_block: index
   ) -> !util.list<?> {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
 
     // Get dimensions from new_k [batch, n_head_kv, head_dim]
-    %batch_size = tensor.dim %new_k, %c0 : tensor<?x?x?x!elem_t>
     %n_head_kv = tensor.dim %new_k, %c1 : tensor<?x?x?x!elem_t>
     %head_dim = tensor.dim %new_k, %c2 : tensor<?x?x?x!elem_t>
-
-    // Slice block_tables for this layer: [batch, max_blocks]
-    %max_blocks = tensor.dim %block_tables, %c2 : tensor<?x?x?xi32>
-    %block_tables_layer = tensor.extract_slice %block_tables[%layer, 0, 0] [1, %batch_size, %max_blocks] [1, 1, 1]
-      : tensor<?x?x?xi32> to tensor<1x?x?xi32>
-    %block_tables_2d = tensor.collapse_shape %block_tables_layer [[0, 1], [2]]
-      : tensor<1x?x?xi32> into tensor<?x?xi32>
 
     // Import K cache
     %k_bv = util.list.get %cache[%c0] : !util.list<?> -> !hal.buffer_view
@@ -283,33 +281,16 @@ module @kvcache_components {
     %block_size = hal.buffer_view.dim<%k_bv : !hal.buffer_view>[1] : index
     %k_blocks = hal.tensor.import %k_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
 
-    // Scatter K: loop over batch
-    %k_updated = scf.for %i = %c0 to %batch_size step %c1
-        iter_args(%cache_k = %k_blocks) -> (tensor<?x?x?x?x!elem_t>) {
+    // Extract new_k[0, :, :] -> [1, n_head_kv, head_dim]
+    %new_k_slice = tensor.extract_slice %new_k[0, 0, 0] [1, %n_head_kv, %head_dim] [1, 1, 1]
+      : tensor<?x?x?x!elem_t> to tensor<1x?x?x!elem_t>
 
-      // Compute logical block and position from absolute position
-      %abs_pos_i64 = tensor.extract %positions[%i] : tensor<?xi64>
-      %abs_pos = arith.index_cast %abs_pos_i64 : i64 to index
-      %logical_block = arith.divui %abs_pos, %block_size : index
-      %pos_in_block = arith.remui %abs_pos, %block_size : index
+    // Insert into cache at [target_block, pos_in_block, :, :]
+    %k_updated = tensor.insert_slice %new_k_slice into %k_blocks[%target_block, %pos_in_block, 0, 0]
+      [1, 1, %n_head_kv, %head_dim] [1, 1, 1, 1]
+      : tensor<1x?x?x!elem_t> into tensor<?x?x?x?x!elem_t>
 
-      // Look up physical block from block_tables
-      %physical_block_i32 = tensor.extract %block_tables_2d[%i, %logical_block] : tensor<?x?xi32>
-      %physical_block = arith.index_cast %physical_block_i32 : i32 to index
-
-      // Extract this sequence's K values [1, n_head_kv, head_dim]
-      %new_k_slice = tensor.extract_slice %new_k[%i, 0, 0] [1, %n_head_kv, %head_dim] [1, 1, 1]
-        : tensor<?x?x?x!elem_t> to tensor<1x?x?x!elem_t>
-
-      // Insert into cache at [physical_block, pos_in_block, :, :]
-      %updated = tensor.insert_slice %new_k_slice into %cache_k[%physical_block, %pos_in_block, 0, 0]
-        [1, 1, %n_head_kv, %head_dim] [1, 1, 1, 1]
-        : tensor<1x?x?x!elem_t> into tensor<?x?x?x?x!elem_t>
-
-      scf.yield %updated : tensor<?x?x?x?x!elem_t>
-    }
-
-    // Tie dimensions after loop
+    // Tie dimensions after update
     %k_updated_tied = flow.tensor.reshape %k_updated : tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim} -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
 
     // Export updated K
@@ -319,28 +300,16 @@ module @kvcache_components {
     %v_bv = util.list.get %cache[%c1] : !util.list<?> -> !hal.buffer_view
     %v_blocks = hal.tensor.import %v_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
 
-    %v_updated = scf.for %i = %c0 to %batch_size step %c1
-        iter_args(%cache_v = %v_blocks) -> (tensor<?x?x?x?x!elem_t>) {
+    // Extract new_v[0, :, :] -> [1, n_head_kv, head_dim]
+    %new_v_slice = tensor.extract_slice %new_v[0, 0, 0] [1, %n_head_kv, %head_dim] [1, 1, 1]
+      : tensor<?x?x?x!elem_t> to tensor<1x?x?x!elem_t>
 
-      %abs_pos_i64 = tensor.extract %positions[%i] : tensor<?xi64>
-      %abs_pos = arith.index_cast %abs_pos_i64 : i64 to index
-      %logical_block = arith.divui %abs_pos, %block_size : index
-      %pos_in_block = arith.remui %abs_pos, %block_size : index
+    // Insert into cache at [target_block, pos_in_block, :, :]
+    %v_updated = tensor.insert_slice %new_v_slice into %v_blocks[%target_block, %pos_in_block, 0, 0]
+      [1, 1, %n_head_kv, %head_dim] [1, 1, 1, 1]
+      : tensor<1x?x?x!elem_t> into tensor<?x?x?x?x!elem_t>
 
-      %physical_block_i32 = tensor.extract %block_tables_2d[%i, %logical_block] : tensor<?x?xi32>
-      %physical_block = arith.index_cast %physical_block_i32 : i32 to index
-
-      %new_v_slice = tensor.extract_slice %new_v[%i, 0, 0] [1, %n_head_kv, %head_dim] [1, 1, 1]
-        : tensor<?x?x?x!elem_t> to tensor<1x?x?x!elem_t>
-
-      %updated = tensor.insert_slice %new_v_slice into %cache_v[%physical_block, %pos_in_block, 0, 0]
-        [1, 1, %n_head_kv, %head_dim] [1, 1, 1, 1]
-        : tensor<1x?x?x!elem_t> into tensor<?x?x?x?x!elem_t>
-
-      scf.yield %updated : tensor<?x?x?x?x!elem_t>
-    }
-
-    // Tie dimensions after loop
+    // Tie dimensions after update
     %v_updated_tied = flow.tensor.reshape %v_updated : tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim} -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
 
     // Export updated V

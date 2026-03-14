@@ -13,15 +13,19 @@
 //
 // Integrates with unified paged KV cache. All layers share the same physical block pool.
 // Layer-aware metadata (block_tables, context_lens) has layer dimension sliced internally
-// by gather/scatter.
+// by gather. Scatter uses scalar indices (logical_block, pos_in_block) passed from the
+// entry point to avoid device->host staging transfers.
 //
 // Logical shapes:
-//   input:           [batch, n_embd]               - Single token hidden state per sequence
-//   positions:       [batch]                       - Single position per sequence
-//   cache:           !util.list<?>                 - Unified KV cache (K_blocks, V_blocks)
-//   block_tables:    [n_layers, batch, max_blocks] - Block indirection
-//   context_lens:    [n_layers, batch]             - Current context length per layer/seq
-//   max_context_len: index                         - Max context for gather output shape
+//   input:              [batch, n_embd]               - Single token hidden state per sequence
+//   positions:          [batch]                       - Single position per sequence
+//   cache:              !util.list<?>                 - Unified KV cache (K_blocks, V_blocks)
+//   block_tables:       [n_layers, batch, max_blocks] - Block indirection (gather only)
+//   context_lens:       [n_layers, batch]             - Current context length per layer/seq
+//   max_context_len:    index                         - Max context for gather output shape
+//   logical_block:      index                         - cur_pos // block_size
+//   pos_in_block:       index                         - cur_pos % block_size
+//   max_blocks_per_seq: index                         - for physical block offset computation
 //
 // Returns:
 //   output:          [batch, n_embd]               - Output hidden state
@@ -70,13 +74,15 @@ module @transformer_layer_moe_decode_components {
         tensor<?x?x?x?xf16>)   // v_gathered: [batch, max_ctx, n_head_kv, head_dim]
 
   // KV cache: scatter new K/V for a specific layer (decode: single token)
+  // Scalar scatter: takes precomputed physical block and position-in-block
+  // instead of device tensors, eliminating staging transfers.
   util.func private @kvcache_components.scatter_decode(
       !util.list<?>,           // cache
       index,                   // layer
       tensor<?x?x?xf16>,       // new_k: [batch, n_head_kv, head_dim]
       tensor<?x?x?xf16>,       // new_v: [batch, n_head_kv, head_dim]
-      tensor<?x?x?xi32>,       // block_tables: [n_layers, batch, max_blocks]
-      tensor<?xi64>            // positions: [batch]
+      index,                   // target_block (physical block index)
+      index                    // pos_in_block
   ) -> !util.list<?>
 
   // Decode attention: process single token with cached K/V (fused QKV)
@@ -129,7 +135,10 @@ module @transformer_layer_moe_decode_components {
       %n_expert_used: index,
       %rms_eps: f32,
       %rope_freq_base: f32,
-      %rope_freq_scale: f32
+      %rope_freq_scale: f32,
+      %logical_block: index,               // logical block index (cur_pos // block_size)
+      %pos_in_block: index,                 // position within block (cur_pos % block_size)
+      %max_blocks_per_seq: index            // for computing physical block offset
   ) -> (tensor<?x?xf16>,                    // output: [batch, n_embd]
         !util.list<?>) {                    // cache_out with new K/V written
     %c0 = arith.constant 0 : index
@@ -182,11 +191,15 @@ module @transformer_layer_moe_decode_components {
            tensor<?xf16>, tensor<?xf16>, f32)
         -> (tensor<?x?xf16>, tensor<?x?x?xf16>, tensor<?x?x?xf16>)
 
-    // Scatter new K/V to cache.
+    // Compute physical block: layer * max_blocks_per_seq + logical_block
+    %layer_offset = arith.muli %layer, %max_blocks_per_seq : index
+    %physical_block = arith.addi %layer_offset, %logical_block : index
+
+    // Scatter new K/V to cache (scalar indices, no staging transfers).
     %cache_updated = util.call @kvcache_components.scatter_decode(
-        %cache, %layer, %k_new, %v_new, %block_tables, %positions)
+        %cache, %layer, %k_new, %v_new, %physical_block, %pos_in_block)
         : (!util.list<?>, index, tensor<?x?x?xf16>, tensor<?x?x?xf16>,
-           tensor<?x?x?xi32>, tensor<?xi64>) -> !util.list<?>
+           index, index) -> !util.list<?>
 
     // Residual connection: input + attn_out.
     %residual1_init = tensor.empty(%batch, %n_embd) : tensor<?x?xf16>

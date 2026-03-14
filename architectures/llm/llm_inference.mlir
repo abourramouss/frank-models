@@ -94,7 +94,7 @@ module @llm_inference {
   ) -> (tensor<?x?x?xf16>,     // output: [batch, seq_len, n_embd]
         !util.list<?>)         // cache_out with K/V written
 
-  // Decode transformer layer
+  // Decode transformer layer (scalar scatter: logical_block, pos_in_block, max_blocks_per_seq)
   util.func private @transformer_layer_moe_decode_components.transformer_layer_moe_decode(
       tensor<?x?xf16>,         // input: [batch, n_embd]
       tensor<?xi64>,           // positions: [batch]
@@ -111,7 +111,10 @@ module @llm_inference {
       index,                   // n_expert_used
       f32,                     // rms_eps
       f32,                     // rope_freq_base
-      f32                      // rope_freq_scale
+      f32,                     // rope_freq_scale
+      index,                   // logical_block
+      index,                   // pos_in_block
+      index                    // max_blocks_per_seq
   ) -> (tensor<?x?xf16>,       // output: [batch, n_embd]
         !util.list<?>)         // cache_out
 
@@ -244,7 +247,10 @@ module @llm_inference {
       %cache: !util.list<?>,
       %block_tables: tensor<?x?x?xi32>,     // [n_layers, batch, max_blocks]
       %context_lens: tensor<?x?xi32>,       // [n_layers, batch]
-      %max_context_len: index
+      %max_context_len: index,
+      %logical_block: index,                // cur_pos // block_size (scalar, no staging)
+      %pos_in_block: index,                 // cur_pos % block_size (scalar, no staging)
+      %max_blocks_per_seq: index            // for physical block offset computation
   ) -> (tensor<?x?xf16>,                    // logits: [batch, vocab_size]
         !util.list<?>) {                    // cache_out
     %c0 = arith.constant 0 : index
@@ -292,12 +298,14 @@ module @llm_inference {
           %layer_idx_i32,
           %n_head, %n_head_kv, %n_embd, %n_ff,
           %n_expert, %n_expert_used,
-          %rms_eps, %rope_freq_base, %rope_freq_scale)
+          %rms_eps, %rope_freq_base, %rope_freq_scale,
+          %logical_block, %pos_in_block, %max_blocks_per_seq)
           : (tensor<?x?xf16>, tensor<?xi64>, !util.list<?>,
              tensor<?x?x?xi32>, tensor<?x?xi32>, index,
              i32,
              index, index, index, index, index, index,
-             f32, f32, f32)
+             f32, f32, f32,
+             index, index, index)
           -> (tensor<?x?xf16>, !util.list<?>)
 
       scf.yield %layer_out, %cache_updated : tensor<?x?xf16>, !util.list<?>

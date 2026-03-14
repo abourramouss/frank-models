@@ -44,8 +44,9 @@ def _scatter_decode_call(module, cache, layer, new_k, new_v, block_indices, pos_
     pos_in_block = int(pos_in_blocks[0])
 
     scatter_func = module.lookup_function("scatter_decode")
-    args = VmVariantList(5)
+    args = VmVariantList(6)
     args.push_list(cache)
+    args.push_int(layer)
     args.push_ref(module._numpy_to_buffer_view(new_k))
     args.push_ref(module._numpy_to_buffer_view(new_v))
     args.push_int(target_block)
@@ -308,8 +309,9 @@ class TestScatterDecode:
 
         # Scatter using new scalar API (target_block, pos_in_block)
         scatter_func = kvcache_module.lookup_function("scatter_decode")
-        scatter_args = VmVariantList(5)
+        scatter_args = VmVariantList(6)
         scatter_args.push_list(cache)
+        scatter_args.push_int(layer)
         scatter_args.push_ref(kvcache_module._numpy_to_buffer_view(new_k))
         scatter_args.push_ref(kvcache_module._numpy_to_buffer_view(new_v))
         scatter_args.push_int(target_block)
