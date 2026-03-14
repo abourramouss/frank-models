@@ -20,7 +20,7 @@
 //
 // Linked modules required:
 //   @hparams - Scalar hyperparameters (vocab_size, block_count, etc.)
-//   @model_params - Parameter accessors (token_embd_weight, attn_q_weight, etc.)
+//   @model_params - Parameter accessors (token_embd_weight, attn_qkv_weight, etc.)
 //   Components: embedding, rms_norm, kvcache, transformer_layer_moe_prefill/decode
 
 module @llm_inference {

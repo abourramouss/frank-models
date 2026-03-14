@@ -38,9 +38,7 @@ module @transformer_layer_moe_decode_components {
   util.func private @model_params.ffn_norm_weight(i32) -> tensor<?xf16>
 
   // Attention projection weights
-  util.func private @model_params.attn_q_weight(i32) -> tensor<?x?xf16>
-  util.func private @model_params.attn_k_weight(i32) -> tensor<?x?xf16>
-  util.func private @model_params.attn_v_weight(i32) -> tensor<?x?xf16>
+  util.func private @model_params.attn_qkv_weight(i32) -> tensor<?x?xf16>
   util.func private @model_params.attn_output_weight(i32) -> tensor<?x?xf16>
 
   // Attention biases (may be dummy zeros if use_bias=false)
@@ -87,15 +85,13 @@ module @transformer_layer_moe_decode_components {
       tensor<?xi64>            // positions: [batch]
   ) -> !util.list<?>
 
-  // Decode attention: process single token with cached K/V
+  // Decode attention: process single token with cached K/V (fused QKV)
   util.func private @attention_block_decode_components.attention_block_decode(
       tensor<?x?xf16>,         // [batch, n_embd]
       tensor<?xi64>,           // [batch]
       tensor<?x?x?x?xf16>,     // k_cached: [batch, ctx_len, n_head_kv, head_dim]
       tensor<?x?x?x?xf16>,     // v_cached: [batch, ctx_len, n_head_kv, head_dim]
-      tensor<?x?xf16>,         // wq
-      tensor<?x?xf16>,         // wk
-      tensor<?x?xf16>,         // wv
+      tensor<?x?xf16>,         // wqkv (fused QKV weight)
       tensor<?x?xf16>,         // wo
       tensor<?xf16>,           // bq
       tensor<?xf16>,           // bk
@@ -163,9 +159,7 @@ module @transformer_layer_moe_decode_components {
     %attn_norm_w = util.call @model_params.attn_norm_weight(%layer_idx) : (i32) -> tensor<?xf16>
     %ffn_norm_w = util.call @model_params.ffn_norm_weight(%layer_idx) : (i32) -> tensor<?xf16>
 
-    %wq = util.call @model_params.attn_q_weight(%layer_idx) : (i32) -> tensor<?x?xf16>
-    %wk = util.call @model_params.attn_k_weight(%layer_idx) : (i32) -> tensor<?x?xf16>
-    %wv = util.call @model_params.attn_v_weight(%layer_idx) : (i32) -> tensor<?x?xf16>
+    %wqkv = util.call @model_params.attn_qkv_weight(%layer_idx) : (i32) -> tensor<?x?xf16>
     %wo = util.call @model_params.attn_output_weight(%layer_idx) : (i32) -> tensor<?x?xf16>
 
     %bq = util.call @model_params.attn_q_bias(%layer_idx) : (i32) -> tensor<?xf16>
@@ -194,18 +188,18 @@ module @transformer_layer_moe_decode_components {
         : (!util.list<?>, index, tensor<?x?x?xi32>, tensor<?x?xi32>, index)
         -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
 
-    // Decode attention with cached K/V.
+    // Decode attention with cached K/V (fused QKV).
     %attn_out, %k_new, %v_new = util.call @attention_block_decode_components.attention_block_decode(
         %attn_normed, %positions,
         %k_cached, %v_cached,
-        %wq, %wk, %wv, %wo,
+        %wqkv, %wo,
         %bq, %bk, %bv, %bo,
         %use_bias, %n_head, %n_head_kv, %n_embd,
         %rope_freq_base, %rope_freq_scale,
         %use_qk_norm, %q_norm_w, %k_norm_w, %rms_eps)
         : (tensor<?x?xf16>, tensor<?xi64>,
            tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>,
-           tensor<?x?xf16>, tensor<?x?xf16>, tensor<?x?xf16>, tensor<?x?xf16>,
+           tensor<?x?xf16>, tensor<?x?xf16>,
            tensor<?xf16>, tensor<?xf16>, tensor<?xf16>, tensor<?xf16>,
            i1, index, index, index, f32, f32,
            i1, tensor<?xf16>, tensor<?xf16>, f32)

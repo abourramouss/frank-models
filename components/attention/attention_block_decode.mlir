@@ -15,7 +15,8 @@
 //   positions:  [batch]                       - single position per sequence
 //   k_cached:   [batch, ctx_len, n_head_kv, head_dim] - gathered past K (with RoPE)
 //   v_cached:   [batch, ctx_len, n_head_kv, head_dim] - gathered past V
-//   wq/wk/wv/wo: same as prefill
+//   wqkv:       [n_embd, n_embd + 2*n_embd_kv] - fused QKV projection weight
+//   wo:         same as prefill
 //
 // Returns:
 //   output:    [batch, n_embd]                - attention output for single token
@@ -50,9 +51,7 @@ module @attention_block_decode_components {
       %positions: tensor<?xi64>,             // [batch] - single position per sequence
       %k_cached: tensor<?x?x?x?xf16>,       // [batch, ctx_len, n_head_kv, head_dim]
       %v_cached: tensor<?x?x?x?xf16>,       // [batch, ctx_len, n_head_kv, head_dim]
-      %wq: tensor<?x?xf16>,                  // [n_embd, n_embd]
-      %wk: tensor<?x?xf16>,                  // [n_embd, n_embd_kv]
-      %wv: tensor<?x?xf16>,                  // [n_embd, n_embd_kv]
+      %wqkv: tensor<?x?xf16>,                // [n_embd, n_embd + 2*n_embd_kv] (fused QKV)
       %wo: tensor<?x?xf16>,                  // [n_embd, n_embd]
       %bq: tensor<?xf16>,                    // [n_embd] - may be dummy if not used
       %bk: tensor<?xf16>,                    // [n_embd_kv]
@@ -80,8 +79,12 @@ module @attention_block_decode_components {
     // Get context length from cached K/V.
     %ctx_len = tensor.dim %k_cached, %c1 : tensor<?x?x?x?xf16>
 
-    // Get dimensions from weights.
-    %n_embd_kv = tensor.dim %wk, %c1 : tensor<?x?xf16>
+    // Get dimensions from fused QKV weight.
+    // wqkv shape: [n_embd, qkv_out_dim] where qkv_out_dim = n_embd + 2*n_embd_kv
+    %qkv_out_dim = tensor.dim %wqkv, %c1 : tensor<?x?xf16>
+    // n_embd_kv = (qkv_out_dim - n_embd) / 2
+    %kv_total = arith.subi %qkv_out_dim, %n_embd : index
+    %n_embd_kv = arith.divsi %kv_total, %c2 : index
 
     // Compute head dimensions.
     %head_dim = arith.divsi %n_embd, %n_head : index
@@ -100,29 +103,26 @@ module @attention_block_decode_components {
         output_shape [%batch, %seq_len_1]
         : tensor<?xi64> into tensor<?x?xi64>
 
-    // QKV projections: [batch, 1, n_embd] @ [n_embd, n_out] -> [batch, 1, n_out]
+    // Fused QKV projection: [batch, n_embd] @ [n_embd, qkv_out_dim] -> [batch, qkv_out_dim]
     %cst_zero = arith.constant 0.0 : f16
 
-    // Q projection.
-    %q_proj_init = tensor.empty(%batch, %n_embd) : tensor<?x?xf16>
-    %q_proj_zero = linalg.fill ins(%cst_zero : f16) outs(%q_proj_init : tensor<?x?xf16>) -> tensor<?x?xf16>
-    %q_proj = linalg.matmul ins(%input, %wq : tensor<?x?xf16>, tensor<?x?xf16>)
-        outs(%q_proj_zero : tensor<?x?xf16>) -> tensor<?x?xf16>
+    %qkv_proj_init = tensor.empty(%batch, %qkv_out_dim) : tensor<?x?xf16>
+    %qkv_proj_zero = linalg.fill ins(%cst_zero : f16) outs(%qkv_proj_init : tensor<?x?xf16>) -> tensor<?x?xf16>
+    %qkv_proj = linalg.matmul ins(%input, %wqkv : tensor<?x?xf16>, tensor<?x?xf16>)
+        outs(%qkv_proj_zero : tensor<?x?xf16>) -> tensor<?x?xf16>
 
-    // K projection.
-    %k_proj_init = tensor.empty(%batch, %n_embd_kv) : tensor<?x?xf16>
-    %k_proj_zero = linalg.fill ins(%cst_zero : f16) outs(%k_proj_init : tensor<?x?xf16>) -> tensor<?x?xf16>
-    %k_proj = linalg.matmul ins(%input, %wk : tensor<?x?xf16>, tensor<?x?xf16>)
-        outs(%k_proj_zero : tensor<?x?xf16>) -> tensor<?x?xf16>
-
-    // V projection.
-    %v_proj_init = tensor.empty(%batch, %n_embd_kv) : tensor<?x?xf16>
-    %v_proj_zero = linalg.fill ins(%cst_zero : f16) outs(%v_proj_init : tensor<?x?xf16>) -> tensor<?x?xf16>
-    %v_proj = linalg.matmul ins(%input, %wv : tensor<?x?xf16>, tensor<?x?xf16>)
-        outs(%v_proj_zero : tensor<?x?xf16>) -> tensor<?x?xf16>
+    // Split fused QKV output: [batch, qkv_out_dim] -> Q[batch, n_embd], K[batch, n_embd_kv], V[batch, n_embd_kv]
+    %q_proj = tensor.extract_slice %qkv_proj[0, 0] [%batch, %n_embd] [1, 1]
+        : tensor<?x?xf16> to tensor<?x?xf16>
+    %k_proj = tensor.extract_slice %qkv_proj[0, %n_embd] [%batch, %n_embd_kv] [1, 1]
+        : tensor<?x?xf16> to tensor<?x?xf16>
+    %v_offset = arith.addi %n_embd, %n_embd_kv : index
+    %v_proj = tensor.extract_slice %qkv_proj[0, %v_offset] [%batch, %n_embd_kv] [1, 1]
+        : tensor<?x?xf16> to tensor<?x?xf16>
 
     // Conditionally add biases if enabled.
     // bias_add: out[b, i] = proj[b, i] + bias[i]
+    %q_bias_out_init = tensor.empty(%batch, %n_embd) : tensor<?x?xf16>
     %q_final = scf.if %use_bias -> (tensor<?x?xf16>) {
       %q_biased = linalg.generic {
         indexing_maps = [
@@ -131,7 +131,7 @@ module @attention_block_decode_components {
           affine_map<(d0, d1) -> (d0, d1)>   // out: [batch, n_embd]
         ],
         iterator_types = ["parallel", "parallel"]
-      } ins(%q_proj, %bq : tensor<?x?xf16>, tensor<?xf16>) outs(%q_proj_init : tensor<?x?xf16>) {
+      } ins(%q_proj, %bq : tensor<?x?xf16>, tensor<?xf16>) outs(%q_bias_out_init : tensor<?x?xf16>) {
       ^bb0(%proj: f16, %bias: f16, %out: f16):
         %sum = arith.addf %proj, %bias : f16
         linalg.yield %sum : f16
@@ -141,6 +141,7 @@ module @attention_block_decode_components {
       scf.yield %q_proj : tensor<?x?xf16>
     }
 
+    %k_bias_out_init = tensor.empty(%batch, %n_embd_kv) : tensor<?x?xf16>
     %k_final = scf.if %use_bias -> (tensor<?x?xf16>) {
       %k_biased = linalg.generic {
         indexing_maps = [
@@ -149,7 +150,7 @@ module @attention_block_decode_components {
           affine_map<(d0, d1) -> (d0, d1)>
         ],
         iterator_types = ["parallel", "parallel"]
-      } ins(%k_proj, %bk : tensor<?x?xf16>, tensor<?xf16>) outs(%k_proj_init : tensor<?x?xf16>) {
+      } ins(%k_proj, %bk : tensor<?x?xf16>, tensor<?xf16>) outs(%k_bias_out_init : tensor<?x?xf16>) {
       ^bb0(%proj: f16, %bias: f16, %out: f16):
         %sum = arith.addf %proj, %bias : f16
         linalg.yield %sum : f16
@@ -159,6 +160,7 @@ module @attention_block_decode_components {
       scf.yield %k_proj : tensor<?x?xf16>
     }
 
+    %v_bias_out_init = tensor.empty(%batch, %n_embd_kv) : tensor<?x?xf16>
     %v_final = scf.if %use_bias -> (tensor<?x?xf16>) {
       %v_biased = linalg.generic {
         indexing_maps = [
@@ -167,7 +169,7 @@ module @attention_block_decode_components {
           affine_map<(d0, d1) -> (d0, d1)>
         ],
         iterator_types = ["parallel", "parallel"]
-      } ins(%v_proj, %bv : tensor<?x?xf16>, tensor<?xf16>) outs(%v_proj_init : tensor<?x?xf16>) {
+      } ins(%v_proj, %bv : tensor<?x?xf16>, tensor<?xf16>) outs(%v_bias_out_init : tensor<?x?xf16>) {
       ^bb0(%proj: f16, %bias: f16, %out: f16):
         %sum = arith.addf %proj, %bias : f16
         linalg.yield %sum : f16
