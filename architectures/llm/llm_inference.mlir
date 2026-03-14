@@ -14,9 +14,9 @@
 // Layer-aware metadata: block_tables[n_layers, batch, max_blocks], context_lens[n_layers, batch].
 //
 // Entry points:
-//   @allocate_kv_cache(n_blocks, block_size) -> (k_cache, v_cache)
-//   @prefill(tokens, positions, k_cache, v_cache, ...) -> (logits, k_cache_out, v_cache_out)
-//   @decode(tokens, positions, k_cache, v_cache, ...) -> (logits, k_cache_out, v_cache_out)
+//   @allocate_kv_cache(n_blocks, block_size) -> cache
+//   @prefill(tokens, positions, cache, ...) -> (logits, cache_out)
+//   @decode(tokens, positions, cache, ...) -> (logits, cache_out)
 //
 // Linked modules required:
 //   @hparams - Scalar hyperparameters (vocab_size, block_count, etc.)
@@ -69,15 +69,13 @@ module @llm_inference {
       index,   // block_size
       index,   // n_head_kv
       index    // head_dim
-  ) -> (tensor<?x?x?x?xf16>,   // k_cache
-        tensor<?x?x?x?xf16>)   // v_cache
+  ) -> !util.list<?>
 
   // Prefill transformer layer (scatters K/V to cache internally)
   util.func private @transformer_layer_moe_prefill_components.transformer_layer_moe_prefill(
       tensor<?x?x?xf16>,   // input: [batch, seq_len, n_embd]
       tensor<?x?xi64>,     // positions: [batch, seq_len]
-      tensor<?x?x?x?xf16>, // k_cache
-      tensor<?x?x?x?xf16>, // v_cache
+      !util.list<?>,       // cache
       tensor<?x?x?xi32>,   // block_tables: [n_layers, batch, max_blocks]
       tensor<?xi32>,       // start_positions: [batch]
       index,               // block_size
@@ -95,15 +93,13 @@ module @llm_inference {
       i1,                  // normalize_weights
       i1                   // use_qk_norm
   ) -> (tensor<?x?x?xf16>,     // output: [batch, seq_len, n_embd]
-        tensor<?x?x?x?xf16>,   // k_cache_out
-        tensor<?x?x?x?xf16>)   // v_cache_out
+        !util.list<?>)         // cache_out with K/V written
 
   // Decode transformer layer
   util.func private @transformer_layer_moe_decode_components.transformer_layer_moe_decode(
       tensor<?x?xf16>,         // input: [batch, n_embd]
       tensor<?xi64>,           // positions: [batch]
-      tensor<?x?x?x?xf16>,     // k_cache
-      tensor<?x?x?x?xf16>,     // v_cache
+      !util.list<?>,           // cache
       tensor<?x?x?xi32>,       // block_tables: [n_layers, batch, max_blocks]
       tensor<?x?xi32>,         // context_lens: [n_layers, batch]
       index,                   // max_context_len
@@ -119,13 +115,9 @@ module @llm_inference {
       f32,                     // rope_freq_scale
       i1,                      // use_bias
       i1,                      // normalize_weights
-      i1,                      // use_qk_norm
-      index,                   // logical_block
-      index,                   // pos_in_block
-      index                    // max_blocks_per_seq
+      i1                       // use_qk_norm
   ) -> (tensor<?x?xf16>,       // output: [batch, n_embd]
-        tensor<?x?x?x?xf16>,   // k_cache_out
-        tensor<?x?x?x?xf16>)   // v_cache_out
+        !util.list<?>)         // cache_out
 
   // ===== KV Cache Allocation =====
   // Derives n_head_kv and head_dim from hparams.
@@ -133,7 +125,7 @@ module @llm_inference {
   util.func public @allocate_kv_cache(
       %n_blocks: index,
       %block_size: index
-  ) -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>) {
+  ) -> !util.list<?> {
     %n_head_kv_i64 = util.call @hparams.attention_head_count_kv() : () -> i64
     %n_embd_i64 = util.call @hparams.embedding_length() : () -> i64
     %n_head_i64 = util.call @hparams.attention_head_count() : () -> i64
@@ -143,10 +135,10 @@ module @llm_inference {
     %n_head = arith.index_cast %n_head_i64 : i64 to index
     %head_dim = arith.divui %n_embd, %n_head : index
 
-    %k_cache, %v_cache = util.call @kvcache_components.allocate(
+    %cache = util.call @kvcache_components.allocate(
         %n_blocks, %block_size, %n_head_kv, %head_dim)
-        : (index, index, index, index) -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
-    util.return %k_cache, %v_cache : tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
+        : (index, index, index, index) -> !util.list<?>
+    util.return %cache : !util.list<?>
   }
 
   // ===== Prefill Entry Point =====
@@ -155,14 +147,12 @@ module @llm_inference {
   util.func public @prefill(
       %tokens: tensor<?x?xi64>,           // [batch, seq_len]
       %positions: tensor<?x?xi64>,        // [batch, seq_len]
-      %k_cache: tensor<?x?x?x?xf16>,     // K cache
-      %v_cache: tensor<?x?x?x?xf16>,     // V cache
+      %cache: !util.list<?>,              // Unified KV cache
       %block_tables: tensor<?x?x?xi32>,   // [n_layers, batch, max_blocks]
       %start_positions: tensor<?xi32>,    // [batch]
       %block_size: index
   ) -> (tensor<?x?x?xf16>,                // logits: [batch, seq_len, vocab_size]
-        tensor<?x?x?x?xf16>,             // k_cache_out
-        tensor<?x?x?x?xf16>) {           // v_cache_out
+        !util.list<?>) {                  // cache_out
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
 
@@ -199,40 +189,28 @@ module @llm_inference {
     %embeddings = util.call @embedding_components.embedding_lookup(%tok_embd_weight, %tokens)
         : (tensor<?x?xf16>, tensor<?x?xi64>) -> tensor<?x?x?xf16>
 
-    // Cache dimension tracking for shape tie inside the loop.
-    %c2 = arith.constant 2 : index
-    %c3 = arith.constant 3 : index
-    %cache_d0 = tensor.dim %k_cache, %c0 : tensor<?x?x?x?xf16>
-    %cache_d1 = tensor.dim %k_cache, %c1 : tensor<?x?x?x?xf16>
-    %cache_d2 = tensor.dim %k_cache, %c2 : tensor<?x?x?x?xf16>
-    %cache_d3 = tensor.dim %k_cache, %c3 : tensor<?x?x?x?xf16>
-
     // Transformer layers loop (prefill variant with cache threading).
     %rope_freq_scale = arith.constant 1.0 : f32
-    %final_hidden, %final_k_cache, %final_v_cache = scf.for %layer_idx = %c0 to %n_layer step %c1
-        iter_args(%hidden = %embeddings, %k_cache_iter = %k_cache, %v_cache_iter = %v_cache)
-        -> (tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>) {
+    %final_hidden, %final_cache = scf.for %layer_idx = %c0 to %n_layer step %c1
+        iter_args(%hidden = %embeddings, %cache_iter = %cache) -> (tensor<?x?x?xf16>, !util.list<?>) {
       %layer_idx_i32 = arith.index_cast %layer_idx : index to i32
 
-      %layer_out, %k_cache_updated, %v_cache_updated = util.call @transformer_layer_moe_prefill_components.transformer_layer_moe_prefill(
-          %hidden, %positions, %k_cache_iter, %v_cache_iter,
+      %layer_out, %cache_updated = util.call @transformer_layer_moe_prefill_components.transformer_layer_moe_prefill(
+          %hidden, %positions, %cache_iter,
           %block_tables, %start_positions, %block_size,
           %layer_idx_i32,
           %n_head, %n_head_kv, %n_embd, %n_ff,
           %n_expert, %n_expert_used,
           %rms_eps, %rope_freq_base, %rope_freq_scale,
           %use_bias, %normalize_weights, %use_qk_norm)
-          : (tensor<?x?x?xf16>, tensor<?x?xi64>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>,
+          : (tensor<?x?x?xf16>, tensor<?x?xi64>, !util.list<?>,
              tensor<?x?x?xi32>, tensor<?xi32>, index,
              i32,
              index, index, index, index, index, index,
              f32, f32, f32, i1, i1, i1)
-          -> (tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
+          -> (tensor<?x?x?xf16>, !util.list<?>)
 
-      // Re-tie cache shapes so IREE can track dimensions through the loop.
-      %k_tied = flow.tensor.tie_shape %k_cache_updated : tensor<?x?x?x?xf16>{%cache_d0, %cache_d1, %cache_d2, %cache_d3}
-      %v_tied = flow.tensor.tie_shape %v_cache_updated : tensor<?x?x?x?xf16>{%cache_d0, %cache_d1, %cache_d2, %cache_d3}
-      scf.yield %layer_out, %k_tied, %v_tied : tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
+      scf.yield %layer_out, %cache_updated : tensor<?x?x?xf16>, !util.list<?>
     }
 
     // Output normalization (operates on 2D: [batch*seq_len, n_embd]).
@@ -258,7 +236,7 @@ module @llm_inference {
         output_shape [%batch, %seq_len, %n_vocab]
         : tensor<?x?xf16> into tensor<?x?x?xf16>
 
-    util.return %logits, %final_k_cache, %final_v_cache : tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
+    util.return %logits, %final_cache : tensor<?x?x?xf16>, !util.list<?>
   }
 
   // ===== Decode Entry Point =====
@@ -267,17 +245,12 @@ module @llm_inference {
   util.func public @decode(
       %tokens: tensor<?xi64>,               // [batch]
       %positions: tensor<?xi64>,            // [batch]
-      %k_cache: tensor<?x?x?x?xf16>,       // K cache
-      %v_cache: tensor<?x?x?x?xf16>,       // V cache
+      %cache: !util.list<?>,
       %block_tables: tensor<?x?x?xi32>,     // [n_layers, batch, max_blocks]
       %context_lens: tensor<?x?xi32>,       // [n_layers, batch]
-      %max_context_len: index,
-      %logical_block: index,                // position // block_size (precomputed on host)
-      %pos_in_block: index,                 // position % block_size (precomputed on host)
-      %max_blocks_per_seq: index            // max blocks per sequence for physical block calc
+      %max_context_len: index
   ) -> (tensor<?x?xf16>,                    // logits: [batch, vocab_size]
-        tensor<?x?x?x?xf16>,               // k_cache_out
-        tensor<?x?x?x?xf16>) {             // v_cache_out
+        !util.list<?>) {                    // cache_out
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
 
@@ -313,42 +286,28 @@ module @llm_inference {
     %embeddings = util.call @embedding_components.embedding_lookup_1d(%tok_embd_weight, %tokens)
         : (tensor<?x?xf16>, tensor<?xi64>) -> tensor<?x?xf16>
 
-    // Cache dimension tracking for shape tie inside the loop.
-    %c2_d = arith.constant 2 : index
-    %c3_d = arith.constant 3 : index
-    %cache_d0_d = tensor.dim %k_cache, %c0 : tensor<?x?x?x?xf16>
-    %cache_d1_d = tensor.dim %k_cache, %c1 : tensor<?x?x?x?xf16>
-    %cache_d2_d = tensor.dim %k_cache, %c2_d : tensor<?x?x?x?xf16>
-    %cache_d3_d = tensor.dim %k_cache, %c3_d : tensor<?x?x?x?xf16>
-
     // Transformer layers loop (decode variant with cache threading).
     %rope_freq_scale = arith.constant 1.0 : f32
-    %final_hidden, %final_k_cache, %final_v_cache = scf.for %layer_idx = %c0 to %n_layer step %c1
-        iter_args(%hidden = %embeddings, %k_cache_iter = %k_cache, %v_cache_iter = %v_cache)
-        -> (tensor<?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>) {
+    %final_hidden, %final_cache = scf.for %layer_idx = %c0 to %n_layer step %c1
+        iter_args(%hidden = %embeddings, %cache_iter = %cache) -> (tensor<?x?xf16>, !util.list<?>) {
       %layer_idx_i32 = arith.index_cast %layer_idx : index to i32
 
-      %layer_out, %k_cache_updated, %v_cache_updated = util.call @transformer_layer_moe_decode_components.transformer_layer_moe_decode(
-          %hidden, %positions, %k_cache_iter, %v_cache_iter,
+      %layer_out, %cache_updated = util.call @transformer_layer_moe_decode_components.transformer_layer_moe_decode(
+          %hidden, %positions, %cache_iter,
           %block_tables, %context_lens, %max_context_len,
           %layer_idx_i32,
           %n_head, %n_head_kv, %n_embd, %n_ff,
           %n_expert, %n_expert_used,
           %rms_eps, %rope_freq_base, %rope_freq_scale,
-          %use_bias_d, %normalize_weights_d, %use_qk_norm_d,
-          %logical_block, %pos_in_block, %max_blocks_per_seq)
-          : (tensor<?x?xf16>, tensor<?xi64>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>,
+          %use_bias_d, %normalize_weights_d, %use_qk_norm_d)
+          : (tensor<?x?xf16>, tensor<?xi64>, !util.list<?>,
              tensor<?x?x?xi32>, tensor<?x?xi32>, index,
              i32,
              index, index, index, index, index, index,
-             f32, f32, f32, i1, i1, i1,
-             index, index, index)
-          -> (tensor<?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
+             f32, f32, f32, i1, i1, i1)
+          -> (tensor<?x?xf16>, !util.list<?>)
 
-      // Re-tie cache shapes.
-      %k_tied_d = flow.tensor.tie_shape %k_cache_updated : tensor<?x?x?x?xf16>{%cache_d0_d, %cache_d1_d, %cache_d2_d, %cache_d3_d}
-      %v_tied_d = flow.tensor.tie_shape %v_cache_updated : tensor<?x?x?x?xf16>{%cache_d0_d, %cache_d1_d, %cache_d2_d, %cache_d3_d}
-      scf.yield %layer_out, %k_tied_d, %v_tied_d : tensor<?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
+      scf.yield %layer_out, %cache_updated : tensor<?x?xf16>, !util.list<?>
     }
 
     // Output normalization.
@@ -365,7 +324,7 @@ module @llm_inference {
     %logits = linalg.matmul ins(%normalized, %output_weight : tensor<?x?xf16>, tensor<?x?xf16>)
         outs(%logits_init : tensor<?x?xf16>) -> tensor<?x?xf16>
 
-    util.return %logits, %final_k_cache, %final_v_cache : tensor<?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
+    util.return %logits, %final_cache : tensor<?x?xf16>, !util.list<?>
   }
 
 }

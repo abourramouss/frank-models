@@ -251,73 +251,59 @@ class OLMoEChat:
 
     # -- Model entry points --
 
-    def allocate_kv_cache(self, n_blocks: int) -> tuple:
+    def allocate_kv_cache(self, n_blocks: int) -> VmVariantList:
         func = self._vm_module.lookup_function("allocate_kv_cache")
         args = VmVariantList(2)
         args.push_int(n_blocks)
         args.push_int(self.block_size)
-        results = VmVariantList(2)
+        results = VmVariantList(1)
         self._context.invoke(func, args, results)
-        k_cache = results.get_as_object(0, HalBufferView)
-        v_cache = results.get_as_object(1, HalBufferView)
-        return (k_cache, v_cache)
+        return results.get_as_list(0)
 
     def prefill(
         self,
         tokens: np.ndarray,
         positions: np.ndarray,
-        cache: tuple,
+        cache: VmVariantList,
         block_tables: np.ndarray,
         start_positions: np.ndarray,
-    ) -> tuple[np.ndarray, tuple]:
-        k_cache, v_cache = cache
+    ) -> tuple[np.ndarray, VmVariantList]:
         func = self._vm_module.lookup_function("prefill")
-        args = VmVariantList(7)
+        args = VmVariantList(6)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
-        args.push_ref(k_cache)
-        args.push_ref(v_cache)
+        args.push_list(cache)
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(start_positions))
         args.push_int(self.block_size)
-        results = VmVariantList(3)
+        results = VmVariantList(2)
         self._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
-        k_out = results.get_as_object(1, HalBufferView)
-        v_out = results.get_as_object(2, HalBufferView)
-        return logits, (k_out, v_out)
+        cache_out = results.get_as_list(1)
+        return logits, cache_out
 
     def decode(
         self,
         tokens: np.ndarray,
         positions: np.ndarray,
-        cache: tuple,
+        cache: VmVariantList,
         block_tables: np.ndarray,
         context_lens: np.ndarray,
         max_context_len: int,
-        logical_block: int,
-        pos_in_block: int,
-        max_blocks_per_seq: int,
-    ) -> tuple[np.ndarray, tuple]:
-        k_cache, v_cache = cache
+    ) -> tuple[np.ndarray, VmVariantList]:
         func = self._vm_module.lookup_function("decode")
-        args = VmVariantList(10)
+        args = VmVariantList(6)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
-        args.push_ref(k_cache)
-        args.push_ref(v_cache)
+        args.push_list(cache)
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(context_lens))
         args.push_int(max_context_len)
-        args.push_int(logical_block)
-        args.push_int(pos_in_block)
-        args.push_int(max_blocks_per_seq)
-        results = VmVariantList(3)
+        results = VmVariantList(2)
         self._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
-        k_out = results.get_as_object(1, HalBufferView)
-        v_out = results.get_as_object(2, HalBufferView)
-        return logits, (k_out, v_out)
+        cache_out = results.get_as_list(1)
+        return logits, cache_out
 
 
 # ---------------------------------------------------------------------------
@@ -380,14 +366,9 @@ def generate(
         context_lens = np.full((n_layers, batch), i, dtype=np.int32)
         max_ctx = i
 
-        # Precompute scatter indices on host to avoid device->host staging transfers
-        logical_blk = i // block_size
-        pos_in_blk = i % block_size
-
         decode_logits, cache = model.decode(
             decode_token, decode_pos, cache, block_tables,
             context_lens, max_ctx,
-            logical_blk, pos_in_blk, max_blocks_per_seq,
         )
         last_logits = decode_logits[0, :]
 
@@ -414,10 +395,6 @@ def generate(
         context_lens = np.full((n_layers, batch), cur_pos, dtype=np.int32)
         max_ctx = cur_pos
 
-        # Precompute scatter indices on host to avoid device->host staging transfers
-        logical_blk = cur_pos // block_size
-        pos_in_blk = cur_pos % block_size
-
         decode_logits, cache = model.decode(
             decode_token,
             decode_pos,
@@ -425,9 +402,6 @@ def generate(
             block_tables,
             context_lens,
             max_ctx,
-            logical_blk,
-            pos_in_blk,
-            max_blocks_per_seq,
         )
         # decode_logits shape: [batch, vocab_size]
         next_token = int(np.argmax(decode_logits[0, :]))
