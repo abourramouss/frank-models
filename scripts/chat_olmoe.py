@@ -251,65 +251,72 @@ class OLMoEChat:
 
     # -- Model entry points --
 
-    def allocate_kv_cache(self, n_blocks: int) -> VmVariantList:
+    def allocate_kv_cache(self, n_blocks: int) -> tuple[HalBufferView, HalBufferView]:
+        """Allocate KV cache, returns (k_cache, v_cache) as HalBufferView pair."""
         func = self._vm_module.lookup_function("allocate_kv_cache")
         args = VmVariantList(2)
         args.push_int(n_blocks)
         args.push_int(self.block_size)
-        results = VmVariantList(1)
+        results = VmVariantList(2)
         self._context.invoke(func, args, results)
-        return results.get_as_list(0)
+        k_cache = results.get_as_object(0, HalBufferView)
+        v_cache = results.get_as_object(1, HalBufferView)
+        return (k_cache, v_cache)
 
     def prefill(
         self,
         tokens: np.ndarray,
         positions: np.ndarray,
-        cache: VmVariantList,
+        cache: tuple[HalBufferView, HalBufferView],
         block_tables: np.ndarray,
         start_positions: np.ndarray,
-    ) -> tuple[np.ndarray, VmVariantList]:
+    ) -> tuple[np.ndarray, tuple[HalBufferView, HalBufferView]]:
         func = self._vm_module.lookup_function("prefill")
-        args = VmVariantList(6)
+        args = VmVariantList(7)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
-        args.push_list(cache)
+        args.push_ref(cache[0])
+        args.push_ref(cache[1])
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(start_positions))
         args.push_int(self.block_size)
-        results = VmVariantList(2)
+        results = VmVariantList(3)
         self._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
-        cache_out = results.get_as_list(1)
-        return logits, cache_out
+        k_out = results.get_as_object(1, HalBufferView)
+        v_out = results.get_as_object(2, HalBufferView)
+        return logits, (k_out, v_out)
 
     def decode(
         self,
         tokens: np.ndarray,
         positions: np.ndarray,
-        cache: VmVariantList,
+        cache: tuple[HalBufferView, HalBufferView],
         block_tables: np.ndarray,
         context_lens: np.ndarray,
         max_context_len: int,
         logical_block: int,
         pos_in_block: int,
         max_blocks_per_seq: int,
-    ) -> tuple[np.ndarray, VmVariantList]:
+    ) -> tuple[np.ndarray, tuple[HalBufferView, HalBufferView]]:
         func = self._vm_module.lookup_function("decode")
-        args = VmVariantList(9)
+        args = VmVariantList(10)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
-        args.push_list(cache)
+        args.push_ref(cache[0])
+        args.push_ref(cache[1])
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(context_lens))
         args.push_int(max_context_len)
         args.push_int(logical_block)
         args.push_int(pos_in_block)
         args.push_int(max_blocks_per_seq)
-        results = VmVariantList(2)
+        results = VmVariantList(3)
         self._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
-        cache_out = results.get_as_list(1)
-        return logits, cache_out
+        k_out = results.get_as_object(1, HalBufferView)
+        v_out = results.get_as_object(2, HalBufferView)
+        return logits, (k_out, v_out)
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +345,7 @@ def generate(
     max_blocks_per_seq = (total_len + block_size - 1) // block_size
     n_blocks = n_layers * batch * max_blocks_per_seq
 
-    # Allocate KV cache
+    # Allocate KV cache (returns tuple of two HalBufferView)
     cache = model.allocate_kv_cache(n_blocks)
 
     # Block tables: [n_layers, batch, max_blocks_per_seq]

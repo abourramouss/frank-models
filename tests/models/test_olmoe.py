@@ -144,7 +144,7 @@ def _get_library_paths() -> list[str]:
 
 
 class OLMoERunner:
-    """Thin runner wrapping a compiled OLMoE module."""
+    """Thin runner wrapping a compiled OLMoE module (pure tensor flow cache)."""
 
     def __init__(self, model):
         self._model = model
@@ -164,29 +164,34 @@ class OLMoERunner:
     def _from_bv(self, bv: HalBufferView) -> np.ndarray:
         return DeviceArray(self._device, bv, implicit_host_transfer=True).to_host()
 
-    def allocate_kv_cache(self, n_blocks: int, block_size: int) -> VmVariantList:
+    def allocate_kv_cache(self, n_blocks: int, block_size: int) -> tuple[HalBufferView, HalBufferView]:
+        """Allocate KV cache, returns (k_cache, v_cache) as HalBufferView pair."""
         func = self._model.lookup_function("allocate_kv_cache")
         args = VmVariantList(2)
         args.push_int(n_blocks)
         args.push_int(block_size)
-        results = VmVariantList(1)
+        results = VmVariantList(2)
         self._model._context.invoke(func, args, results)
-        return results.get_as_list(0)
+        k_cache = results.get_as_object(0, HalBufferView)
+        v_cache = results.get_as_object(1, HalBufferView)
+        return (k_cache, v_cache)
 
     def prefill(self, tokens, positions, cache, block_tables, start_positions, block_size):
         func = self._model.lookup_function("prefill")
-        args = VmVariantList(6)
+        args = VmVariantList(7)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
-        args.push_list(cache)
+        args.push_ref(cache[0])
+        args.push_ref(cache[1])
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(start_positions))
         args.push_int(block_size)
-        results = VmVariantList(2)
+        results = VmVariantList(3)
         self._model._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
-        cache_out = results.get_as_list(1)
-        return logits, cache_out
+        k_out = results.get_as_object(1, HalBufferView)
+        v_out = results.get_as_object(2, HalBufferView)
+        return logits, (k_out, v_out)
 
     def decode(self, tokens, positions, cache, block_tables, context_lens,
                max_context_len, logical_block, pos_in_block, max_blocks_per_seq):
@@ -194,18 +199,20 @@ class OLMoERunner:
         args = VmVariantList(10)
         args.push_ref(self._to_bv(tokens))
         args.push_ref(self._to_bv(positions))
-        args.push_list(cache)
+        args.push_ref(cache[0])
+        args.push_ref(cache[1])
         args.push_ref(self._to_bv(block_tables))
         args.push_ref(self._to_bv(context_lens))
         args.push_int(max_context_len)
         args.push_int(logical_block)
         args.push_int(pos_in_block)
         args.push_int(max_blocks_per_seq)
-        results = VmVariantList(2)
+        results = VmVariantList(3)
         self._model._context.invoke(func, args, results)
         logits = self._from_bv(results.get_as_object(0, HalBufferView))
-        cache_out = results.get_as_list(1)
-        return logits, cache_out
+        k_out = results.get_as_object(1, HalBufferView)
+        v_out = results.get_as_object(2, HalBufferView)
+        return logits, (k_out, v_out)
 
 
 class TestOLMoECompilation:

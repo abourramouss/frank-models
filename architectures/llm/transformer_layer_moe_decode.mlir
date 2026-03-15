@@ -11,15 +11,13 @@
 //   input → attn_norm → gather(cache) → attention_block_decode → scatter_decode(cache)
 //         → +residual → ffn_norm → moe_ffn_block → +residual → output
 //
-// Integrates with unified paged KV cache. All layers share the same physical block pool.
-// Layer-aware metadata (block_tables, context_lens) has layer dimension sliced internally
-// by gather. Scatter uses scalar indices (logical_block, pos_in_block) passed from the
-// entry point to avoid device->host staging transfers.
+// Pure tensor flow: KV cache is passed as (k_cache, v_cache) tensor pair,
+// eliminating !util.list<?> and HAL import/export sync points.
 //
 // Logical shapes:
 //   input:              [batch, n_embd]               - Single token hidden state per sequence
 //   positions:          [batch]                       - Single position per sequence
-//   cache:              !util.list<?>                 - Unified KV cache (K_blocks, V_blocks)
+//   k_cache, v_cache:   [n_blocks, block_size, n_head_kv, head_dim] - Unified KV cache
 //   block_tables:       [n_layers, batch, max_blocks] - Block indirection (gather only)
 //   context_lens:       [n_layers, batch]             - Current context length per layer/seq
 //   max_context_len:    index                         - Max context for gather output shape
@@ -29,7 +27,8 @@
 //
 // Returns:
 //   output:          [batch, n_embd]               - Output hidden state
-//   cache_out:       !util.list<?>                 - Cache with new K/V written
+//   k_cache_out:     [n_blocks, block_size, n_head_kv, head_dim] - Updated K cache
+//   v_cache_out:     [n_blocks, block_size, n_head_kv, head_dim] - Updated V cache
 //
 // Reference: transformer_layer_moe.mlir, attention_block_decode.mlir, kvcache.mlir
 
@@ -63,27 +62,29 @@ module @transformer_layer_moe_decode_components {
       f32                  // epsilon
   ) -> tensor<?x?xf16>
 
-  // KV cache: gather K/V for a specific layer
+  // KV cache: gather K/V for a specific layer (pure tensor flow)
   util.func private @kvcache_components.gather(
-      !util.list<?>,           // cache
-      index,                   // layer
-      tensor<?x?x?xi32>,       // block_tables [n_layers, batch, max_blocks]
-      tensor<?x?xi32>,         // context_lens [n_layers, batch]
-      index                    // max_context_len
-  ) -> (tensor<?x?x?x?xf16>,   // k_gathered: [batch, max_ctx, n_head_kv, head_dim]
-        tensor<?x?x?x?xf16>)   // v_gathered: [batch, max_ctx, n_head_kv, head_dim]
+      tensor<?x?x?x?xf16>,      // k_cache [n_blocks, block_size, n_head_kv, head_dim]
+      tensor<?x?x?x?xf16>,      // v_cache
+      index,                     // layer
+      tensor<?x?x?xi32>,         // block_tables [n_layers, batch, max_blocks]
+      tensor<?x?xi32>,           // context_lens [n_layers, batch]
+      index                      // max_context_len
+  ) -> (tensor<?x?x?x?xf16>,    // k_gathered: [batch, max_ctx, n_head_kv, head_dim]
+        tensor<?x?x?x?xf16>)    // v_gathered: [batch, max_ctx, n_head_kv, head_dim]
 
-  // KV cache: scatter new K/V for a specific layer (decode: single token)
-  // Scalar scatter: takes precomputed physical block and position-in-block
-  // instead of device tensors, eliminating staging transfers.
+  // KV cache: scatter new K/V for a specific layer (decode: single token, pure tensor flow)
+  // Scalar scatter: takes precomputed physical block and position-in-block.
   util.func private @kvcache_components.scatter_decode(
-      !util.list<?>,           // cache
-      index,                   // layer
-      tensor<?x?x?xf16>,       // new_k: [batch, n_head_kv, head_dim]
-      tensor<?x?x?xf16>,       // new_v: [batch, n_head_kv, head_dim]
-      index,                   // target_block (physical block index)
-      index                    // pos_in_block
-  ) -> !util.list<?>
+      tensor<?x?x?x?xf16>,      // k_cache
+      tensor<?x?x?x?xf16>,      // v_cache
+      index,                     // layer
+      tensor<?x?x?xf16>,         // new_k: [batch, n_head_kv, head_dim]
+      tensor<?x?x?xf16>,         // new_v: [batch, n_head_kv, head_dim]
+      index,                     // target_block (physical block index)
+      index                      // pos_in_block
+  ) -> (tensor<?x?x?x?xf16>,    // k_cache_out
+        tensor<?x?x?x?xf16>)    // v_cache_out
 
   // Decode attention: process single token with cached K/V (fused QKV)
   util.func private @attention_block_decode_components.attention_block_decode(
@@ -122,7 +123,8 @@ module @transformer_layer_moe_decode_components {
   util.func public @transformer_layer_moe_decode(
       %input: tensor<?x?xf16>,             // [batch, n_embd]
       %positions: tensor<?xi64>,            // [batch]
-      %cache: !util.list<?>,                // Unified KV cache
+      %k_cache: tensor<?x?x?x?xf16>,       // KV cache K tensor
+      %v_cache: tensor<?x?x?x?xf16>,       // KV cache V tensor
       %block_tables: tensor<?x?x?xi32>,     // [n_layers, batch, max_blocks]
       %context_lens: tensor<?x?xi32>,       // [n_layers, batch]
       %max_context_len: index,
@@ -140,7 +142,8 @@ module @transformer_layer_moe_decode_components {
       %pos_in_block: index,                 // position within block (cur_pos % block_size)
       %max_blocks_per_seq: index            // for computing physical block offset
   ) -> (tensor<?x?xf16>,                    // output: [batch, n_embd]
-        !util.list<?>) {                    // cache_out with new K/V written
+        tensor<?x?x?x?xf16>,               // k_cache_out
+        tensor<?x?x?x?xf16>) {             // v_cache_out
     %c0 = arith.constant 0 : index
     %batch = tensor.dim %input, %c0 : tensor<?x?xf16>
 
@@ -172,8 +175,8 @@ module @transformer_layer_moe_decode_components {
 
     // Gather cached K/V for this layer: [batch, max_ctx, n_head_kv, head_dim].
     %k_cached, %v_cached = util.call @kvcache_components.gather(
-        %cache, %layer, %block_tables, %context_lens, %max_context_len)
-        : (!util.list<?>, index, tensor<?x?x?xi32>, tensor<?x?xi32>, index)
+        %k_cache, %v_cache, %layer, %block_tables, %context_lens, %max_context_len)
+        : (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>, index, tensor<?x?x?xi32>, tensor<?x?xi32>, index)
         -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
 
     // Decode attention with cached K/V (fused QKV).
@@ -195,11 +198,11 @@ module @transformer_layer_moe_decode_components {
     %layer_offset = arith.muli %layer, %max_blocks_per_seq : index
     %physical_block = arith.addi %layer_offset, %logical_block : index
 
-    // Scatter new K/V to cache (scalar indices, no staging transfers).
-    %cache_updated = util.call @kvcache_components.scatter_decode(
-        %cache, %layer, %k_new, %v_new, %physical_block, %pos_in_block)
-        : (!util.list<?>, index, tensor<?x?x?xf16>, tensor<?x?x?xf16>,
-           index, index) -> !util.list<?>
+    // Scatter new K/V to cache (scalar indices, pure tensor flow).
+    %k_cache_out, %v_cache_out = util.call @kvcache_components.scatter_decode(
+        %k_cache, %v_cache, %layer, %k_new, %v_new, %physical_block, %pos_in_block)
+        : (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>, index, tensor<?x?x?xf16>, tensor<?x?x?xf16>,
+           index, index) -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
 
     // Residual connection: input + attn_out.
     %residual1_init = tensor.empty(%batch, %n_embd) : tensor<?x?xf16>
@@ -249,7 +252,7 @@ module @transformer_layer_moe_decode_components {
       linalg.yield %sum : f16
     } -> tensor<?x?xf16>
 
-    util.return %output, %cache_updated : tensor<?x?xf16>, !util.list<?>
+    util.return %output, %k_cache_out, %v_cache_out : tensor<?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
   }
 
 }
