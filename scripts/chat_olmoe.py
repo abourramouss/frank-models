@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -199,6 +200,7 @@ class OLMoEChat:
         backend: str = "llvm-cpu",
         block_size: int = 16,
         max_seq_len: int = 2048,
+        cpu_vmfb_path: Path | None = None,
     ):
         self.cfg = OLMOE_CONFIG
         self.block_size = block_size
@@ -208,8 +210,16 @@ class OLMoEChat:
         self.instance = VmInstance()
         self.device = get_device(driver)
 
-        # HAL module
+        # HAL module for GPU
         hal_module = create_hal_module(self.instance, self.device)
+
+        # Optional: separate CPU device + VMFB for IREE-compiled CPU postprocessing
+        self._cpu_context = None
+        if cpu_vmfb_path is not None:
+            cpu_device = get_device("local-task")
+            cpu_hal = create_hal_module(self.instance, cpu_device)
+            self._cpu_device = cpu_device
+            print(f"[runtime] CPU VMFB: {cpu_vmfb_path}")
 
         # Parameter module (loads .irpa at runtime)
         print(f"[runtime] Loading parameters from {params_path} ...")
@@ -220,6 +230,26 @@ class OLMoEChat:
         params_module = create_io_parameters_module(self.instance, provider)
         print(f"[runtime] Parameters loaded in {time.time() - t0:.1f}s")
 
+        # Extract CPU-side weights for hetero post-processing
+        print(f"[runtime] Extracting CPU weights for hetero post-processing ...")
+        for name, entry in param_index.items():
+            if name == "output_norm.weight":
+                self.output_norm_weight = np.frombuffer(
+                    entry.file_view, dtype=np.float16
+                ).copy()  # [2048]
+            elif name == "output.weight":
+                # MLIR loads as [n_embd, vocab] = [2048, 50304] — match that layout
+                self.output_weight = np.frombuffer(
+                    entry.file_view, dtype=np.float16
+                ).reshape(self.cfg["n_embd"], self.cfg["vocab_size"]).copy()  # [2048, 50304]
+        self.rms_eps = self.cfg["rms_eps"]
+        # Pre-compute output weight in f32 for CPU LM head matmul
+        # Already [2048, 50304] — no transpose needed
+        self.output_weight_f32 = self.output_weight.astype(np.float32).copy()
+        self.output_norm_weight_f32 = self.output_norm_weight.astype(np.float32).copy()
+        print(f"[runtime] CPU weights: output_norm={self.output_norm_weight.shape}, "
+              f"output={self.output_weight.shape}")
+
         # Compiled module
         print(f"[runtime] Loading compiled module from {vmfb_path} ...")
         t0 = time.time()
@@ -228,10 +258,36 @@ class OLMoEChat:
         print(f"[runtime] Module loaded in {time.time() - t0:.1f}s")
 
         self._vm_module = main_module
-        # io_parameters must come before the compiled module in the context
-        self._context = VmContext(
-            self.instance, modules=[params_module, hal_module, main_module]
-        )
+
+        # Try multi-device context (GPU + CPU) first for single-VMFB hetero.
+        # Fall back to single-device if the VMFB doesn't require a CPU device.
+        try:
+            cpu_device = get_device("local-task")
+            multi_hal = create_hal_module(
+                self.instance, devices=[self.device, cpu_device]
+            )
+            self._context = VmContext(
+                self.instance, modules=[params_module, multi_hal, main_module]
+            )
+            print(f"[runtime] Multi-device context: GPU + CPU")
+        except Exception:
+            self._context = VmContext(
+                self.instance, modules=[params_module, hal_module, main_module]
+            )
+
+        # Set up CPU context if cpu_vmfb provided
+        if cpu_vmfb_path is not None:
+            print(f"[runtime] Loading CPU VMFB from {cpu_vmfb_path} ...")
+            with open(cpu_vmfb_path, "rb") as f:
+                cpu_module = VmModule.copy_buffer(self.instance, f.read())
+            # CPU context needs its own params provider + HAL
+            cpu_provider = param_index.create_provider(scope="model")
+            cpu_params_module = create_io_parameters_module(self.instance, cpu_provider)
+            self._cpu_module = cpu_module
+            self._cpu_context = VmContext(
+                self.instance, modules=[cpu_params_module, cpu_hal, cpu_module]
+            )
+            print(f"[runtime] CPU module ready: {cpu_module.function_names}")
 
     # -- Tensor conversion helpers --
 
@@ -305,6 +361,88 @@ class OLMoEChat:
         cache_out = results.get_as_list(1)
         return logits, cache_out
 
+    def decode_body(
+        self,
+        tokens: np.ndarray,
+        positions: np.ndarray,
+        cache: VmVariantList,
+        block_tables: np.ndarray,
+        context_lens: np.ndarray,
+        max_context_len: int,
+    ) -> tuple[np.ndarray, VmVariantList]:
+        """Run transformer layers only — returns hidden state, not logits."""
+        func = self._vm_module.lookup_function("decode_body")
+        args = VmVariantList(6)
+        args.push_ref(self._to_bv(tokens))
+        args.push_ref(self._to_bv(positions))
+        args.push_list(cache)
+        args.push_ref(self._to_bv(block_tables))
+        args.push_ref(self._to_bv(context_lens))
+        args.push_int(max_context_len)
+        results = VmVariantList(2)
+        self._context.invoke(func, args, results)
+        hidden = self._from_bv(results.get_as_object(0, HalBufferView))
+        cache_out = results.get_as_list(1)
+        return hidden, cache_out
+
+    def decode_hetero(
+        self,
+        tokens: np.ndarray,
+        positions: np.ndarray,
+        cache: VmVariantList,
+        block_tables: np.ndarray,
+        context_lens: np.ndarray,
+        max_context_len: int,
+    ) -> tuple[np.ndarray, VmVariantList]:
+        """Heterogeneous decode: GPU transformer layers + CPU output norm/LM head.
+        Device affinities set in MLIR via flow.tensor.transfer."""
+        func = self._vm_module.lookup_function("decode_hetero")
+        args = VmVariantList(6)
+        args.push_ref(self._to_bv(tokens))
+        args.push_ref(self._to_bv(positions))
+        args.push_list(cache)
+        args.push_ref(self._to_bv(block_tables))
+        args.push_ref(self._to_bv(context_lens))
+        args.push_int(max_context_len)
+        results = VmVariantList(2)
+        self._context.invoke(func, args, results)
+        logits = self._from_bv(results.get_as_object(0, HalBufferView))
+        cache_out = results.get_as_list(1)
+        return logits, cache_out
+
+    def cpu_postprocess_iree(self, hidden: np.ndarray) -> tuple[np.ndarray]:
+        """CPU-side postprocess using IREE llvm-cpu VMFB (compiled MLIR)."""
+        func = self._cpu_module.lookup_function("postprocess")
+        # Allocate on CPU device
+        arr = np.ascontiguousarray(hidden)
+        etype = DTYPE_TO_ELEMENT_TYPE[arr.dtype.type]
+        bv = self._cpu_device.allocator.allocate_buffer_copy(
+            memory_type=MemoryType.DEVICE_LOCAL,
+            allowed_usage=(BufferUsage.DEFAULT | BufferUsage.MAPPING),
+            device=self._cpu_device,
+            buffer=arr,
+            element_type=etype,
+        )
+        args = VmVariantList(1)
+        args.push_ref(bv)
+        results = VmVariantList(1)
+        self._cpu_context.invoke(func, args, results)
+        logits_bv = results.get_as_object(0, HalBufferView)
+        logits = DeviceArray(self._cpu_device, logits_bv, implicit_host_transfer=True).to_host()
+        return logits
+
+    def cpu_postprocess(self, hidden: np.ndarray) -> int:
+        """CPU-side output norm + LM head + argmax (replaces 2-3 GPU dispatches)."""
+        # RMSNorm in f32 for stability (matches MLIR semantics)
+        x = hidden.astype(np.float32)
+        sum_sq = np.sum(x * x, axis=-1, keepdims=True)
+        rms = np.sqrt(sum_sq / x.shape[-1] + self.rms_eps)
+        normed = (x / rms) * self.output_norm_weight_f32
+
+        # LM head: [batch, 2048] @ [2048, 50304] -> [batch, 50304]
+        logits = normed @ self.output_weight_f32
+        return int(np.argmax(logits[0, :]))
+
 
 # ---------------------------------------------------------------------------
 # Chat loop
@@ -360,13 +498,15 @@ def generate(
     last_logits = prefill_logits[0, 0, :]  # [vocab_size]
 
     # Process remaining prompt tokens via decode (reads from KV cache)
+    # Use decode_hetero if available (single-VMFB multi-device mode)
+    _prompt_decode_fn = model.decode_hetero if model._vm_module.lookup_function("decode_hetero") else model.decode
     for i in range(1, seq_len):
         decode_token = np.array([token_ids[i]], dtype=np.int64)
         decode_pos = np.array([i], dtype=np.int64)
         context_lens = np.full((n_layers, batch), i, dtype=np.int32)
         max_ctx = i
 
-        decode_logits, cache = model.decode(
+        decode_logits, cache = _prompt_decode_fn(
             decode_token, decode_pos, cache, block_tables,
             context_lens, max_ctx,
         )
@@ -376,6 +516,21 @@ def generate(
 
     generated: list[int] = []
     cur_pos = seq_len  # position of the token we just generated
+
+    # Detect available decode modes
+    func_dh = model._vm_module.lookup_function("decode_hetero")
+    func_db = model._vm_module.lookup_function("decode_body")
+    if func_dh is not None:
+        decode_mode = "hetero_mlir"
+        print(f"[hetero] Using decode_hetero (single VMFB, MLIR device affinities)")
+    elif func_db is not None and model._cpu_context is not None:
+        decode_mode = "hetero_iree"
+        print(f"[hetero] Using decode_body (GPU VMFB) + postprocess (CPU VMFB)")
+    elif func_db is not None:
+        decode_mode = "hetero_numpy"
+        print(f"[hetero] Using decode_body (GPU VMFB) + numpy CPU post-processing")
+    else:
+        decode_mode = "gpu_only"
 
     for step in range(max_new_tokens):
         generated.append(next_token)
@@ -395,16 +550,36 @@ def generate(
         context_lens = np.full((n_layers, batch), cur_pos, dtype=np.int32)
         max_ctx = cur_pos
 
-        decode_logits, cache = model.decode(
-            decode_token,
-            decode_pos,
-            cache,
-            block_tables,
-            context_lens,
-            max_ctx,
-        )
-        # decode_logits shape: [batch, vocab_size]
-        next_token = int(np.argmax(decode_logits[0, :]))
+        if decode_mode == "hetero_mlir":
+            # Single VMFB: GPU layers + CPU postprocess via flow.tensor.transfer
+            decode_logits, cache = model.decode_hetero(
+                decode_token, decode_pos, cache,
+                block_tables, context_lens, max_ctx,
+            )
+            next_token = int(np.argmax(decode_logits[0, :]))
+        elif decode_mode == "hetero_iree":
+            # Two VMFBs: GPU decode_body + CPU postprocess
+            hidden, cache = model.decode_body(
+                decode_token, decode_pos, cache,
+                block_tables, context_lens, max_ctx,
+            )
+            logits = model.cpu_postprocess_iree(hidden)
+            next_token = int(np.argmax(logits[0, :]))
+        elif decode_mode == "hetero_numpy":
+            # GPU: transformer layers only
+            hidden, cache = model.decode_body(
+                decode_token, decode_pos, cache,
+                block_tables, context_lens, max_ctx,
+            )
+            # CPU: output norm + LM head + argmax
+            next_token = model.cpu_postprocess(hidden)
+        else:
+            decode_logits, cache = model.decode(
+                decode_token, decode_pos, cache,
+                block_tables, context_lens, max_ctx,
+            )
+            next_token = int(np.argmax(decode_logits[0, :]))
+
         cur_pos += 1
 
     if tokenizer is not None:
@@ -511,6 +686,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory containing iree-link and iree-compile",
     )
+    parser.add_argument(
+        "--cpu-vmfb",
+        type=Path,
+        default=None,
+        help="Path to CPU VMFB for hetero postprocessing (compiled with llvm-cpu)",
+    )
     return parser.parse_args()
 
 
@@ -557,6 +738,7 @@ def main():
         params_path=args.params,
         backend=args.backend,
         block_size=args.block_size,
+        cpu_vmfb_path=args.cpu_vmfb,
     )
     print("[init] Model ready.")
 
