@@ -11,21 +11,20 @@
 //   input → attn_norm → attention_block_prefill → scatter_prefill(cache) → +residual
 //         → ffn_norm  → moe_ffn_block          → +residual → output
 //
-// Pure tensor flow: KV cache is passed as (k_cache, v_cache) tensor pair,
-// eliminating !util.list<?> and HAL import/export sync points.
+// Integrates with unified paged KV cache. K/V from attention is scattered to cache
+// before returning.
 //
 // Logical shapes:
 //   input:           [batch, seq_len, n_embd]           - Input hidden states
 //   positions:       [batch, seq_len]                   - Position indices for RoPE
-//   k_cache, v_cache: [n_blocks, block_size, n_head_kv, head_dim] - Unified KV cache
+//   cache:           !util.list<?>                      - Unified KV cache
 //   block_tables:    [n_layers, batch, max_blocks]      - Block indirection
 //   start_positions: [batch]                            - Where to start writing (usually 0)
 //   block_size:      index                              - Tokens per block
 //
 // Returns:
 //   output:          [batch, seq_len, n_embd]           - Output hidden states
-//   k_cache_out:     [n_blocks, block_size, n_head_kv, head_dim] - Updated K cache
-//   v_cache_out:     [n_blocks, block_size, n_head_kv, head_dim] - Updated V cache
+//   cache_out:       !util.list<?>                      - Cache with K/V written
 //
 // Reference: transformer_layer_moe.mlir, attention_block_prefill.mlir, kvcache.mlir
 
@@ -102,26 +101,23 @@ module @transformer_layer_moe_prefill_components {
       index                  // n_ff
   ) -> tensor<?x?xf16>
 
-  // KV cache scatter for prefill (pure tensor flow)
+  // KV cache scatter for prefill
   util.func private @kvcache_components.scatter_prefill(
-      tensor<?x?x?x?xf16>,      // k_cache
-      tensor<?x?x?x?xf16>,      // v_cache
-      index,                     // layer
-      tensor<?x?x?x?xf16>,       // new_k: [batch, seq_len, n_head_kv, head_dim]
-      tensor<?x?x?x?xf16>,       // new_v: [batch, seq_len, n_head_kv, head_dim]
-      tensor<?x?x?xi32>,         // block_tables: [n_layers, batch, max_blocks]
-      tensor<?xi32>,             // start_positions: [batch]
-      index                      // block_size
-  ) -> (tensor<?x?x?x?xf16>,    // k_cache_out
-        tensor<?x?x?x?xf16>)    // v_cache_out
+      !util.list<?>,           // cache
+      index,                   // layer
+      tensor<?x?x?x?xf16>,     // new_k: [batch, seq_len, n_head_kv, head_dim]
+      tensor<?x?x?x?xf16>,     // new_v: [batch, seq_len, n_head_kv, head_dim]
+      tensor<?x?x?xi32>,       // block_tables: [n_layers, batch, max_blocks]
+      tensor<?xi32>,           // start_positions: [batch]
+      index                    // block_size
+  ) -> !util.list<?>
 
   // ===== Layer function =====
 
   util.func public @transformer_layer_moe_prefill(
       %input: tensor<?x?x?xf16>,        // [batch, seq_len, n_embd]
       %positions: tensor<?x?xi64>,       // [batch, seq_len]
-      %k_cache: tensor<?x?x?x?xf16>,    // KV cache K tensor
-      %v_cache: tensor<?x?x?x?xf16>,    // KV cache V tensor
+      %cache: !util.list<?>,             // Unified KV cache
       %block_tables: tensor<?x?x?xi32>,  // [n_layers, batch, max_blocks]
       %start_positions: tensor<?xi32>,   // [batch] - where to start writing (usually 0)
       %block_size: index,
@@ -138,8 +134,7 @@ module @transformer_layer_moe_prefill_components {
       %use_bias: i1,
       %use_qk_norm: i1
   ) -> (tensor<?x?x?xf16>,               // output: [batch, seq_len, n_embd]
-        tensor<?x?x?x?xf16>,             // k_cache_out
-        tensor<?x?x?x?xf16>) {           // v_cache_out
+        !util.list<?>) {                 // cache_out with K/V written
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
@@ -169,7 +164,7 @@ module @transformer_layer_moe_prefill_components {
 
     // ---- Attention sub-layer ----
 
-    // Flatten [batch, seq_len, n_embd] -> [n_tokens, n_embd] for rms_norm (2D).
+    // Flatten [batch, seq_len, n_embd] → [n_tokens, n_embd] for rms_norm (2D).
     %input_2d = tensor.collapse_shape %input [[0, 1], [2]]
         : tensor<?x?x?xf16> into tensor<?x?xf16>
 
@@ -215,7 +210,7 @@ module @transformer_layer_moe_prefill_components {
 
     // ---- MoE FFN sub-layer ----
 
-    // Flatten [batch, seq_len, n_embd] -> [n_tokens, n_embd] for rms_norm + moe_ffn_block.
+    // Flatten [batch, seq_len, n_embd] → [n_tokens, n_embd] for rms_norm + moe_ffn_block.
     %residual1_2d = tensor.collapse_shape %residual1 [[0, 1], [2]]
         : tensor<?x?x?xf16> into tensor<?x?xf16>
 
@@ -253,15 +248,15 @@ module @transformer_layer_moe_prefill_components {
       linalg.yield %sum : f16
     } -> tensor<?x?x?xf16>
 
-    // Scatter K/V to cache for this layer (pure tensor flow).
+    // Scatter K/V to cache for this layer.
     %layer = arith.index_cast %layer_idx : i32 to index
-    %k_cache_out, %v_cache_out = util.call @kvcache_components.scatter_prefill(
-        %k_cache, %v_cache, %layer, %k_out, %v_out,
+    %cache_updated = util.call @kvcache_components.scatter_prefill(
+        %cache, %layer, %k_out, %v_out,
         %block_tables, %start_positions, %block_size)
-        : (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>, index, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>,
-           tensor<?x?x?xi32>, tensor<?xi32>, index) -> (tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>)
+        : (!util.list<?>, index, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>,
+           tensor<?x?x?xi32>, tensor<?xi32>, index) -> !util.list<?>
 
-    util.return %output, %k_cache_out, %v_cache_out : tensor<?x?x?xf16>, tensor<?x?x?x?xf16>, tensor<?x?x?x?xf16>
+    util.return %output, %cache_updated : tensor<?x?x?xf16>, !util.list<?>
   }
 
 }

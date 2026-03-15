@@ -6,7 +6,7 @@
 
 // Fused indirect matrix multiply for MoE expert selection.
 // Combines gather + matmul into a single linalg.generic that reads
-// expert weights inline via tensor.extract — no intermediate gather buffer.
+// expert weights inline via tensor.extract -- no intermediate gather buffer.
 //
 // For each expert slot e and token t:
 //   expert_id = ids[e, t]
