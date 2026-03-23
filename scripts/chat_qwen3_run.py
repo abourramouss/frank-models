@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Qwen3-0.6B multi-turn chat via single ctx.invoke per turn."""
+import sys, time, numpy as np
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from iree.runtime import *
+from tokenizers import Tokenizer
+import os
+
+SNAP = "/home/bourram/models/qwen3-0.6b/models--Qwen--Qwen3-0.6B/snapshots"
+snap_dir = next(os.path.join(SNAP, d) for d in os.listdir(SNAP) if os.path.isdir(os.path.join(SNAP, d)))
+tokenizer = Tokenizer.from_file(os.path.join(snap_dir, "tokenizer.json"))
+
+inst = VmInstance()
+device = get_device("cuda")
+hal = create_hal_module(inst, device)
+pi = ParameterIndex()
+pi.load("/home/bourram/models/qwen3-0.6b-f16-stacked.irpa")
+params = create_io_parameters_module(inst, pi.create_provider(scope="model"))
+with open("/tmp/qwen3_run_SINGLE.vmfb", "rb") as f:
+    mod = VmModule.copy_buffer(inst, f.read())
+ctx = VmContext(inst, modules=[params, hal, mod])
+run = mod.lookup_function("run")
+
+def to_bv(arr):
+    return device.allocator.allocate_buffer_copy(
+        memory_type=MemoryType.DEVICE_LOCAL,
+        allowed_usage=BufferUsage.DEFAULT | BufferUsage.MAPPING,
+        device=device, buffer=np.ascontiguousarray(arr),
+        element_type=HalElementType.SINT_64)
+
+history = ""
+while True:
+    try:
+        text = input("\n> ")
+    except (EOFError, KeyboardInterrupt):
+        break
+    if not text.strip():
+        break
+    history += f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
+    tokens = tokenizer.encode(history).ids
+    a = VmVariantList(4)
+    a.push_ref(to_bv(np.array(tokens, dtype=np.int64)))
+    a.push_int(len(tokens))
+    a.push_int(128)
+    a.push_int(151645)
+    r = VmVariantList(2)
+    t0 = time.time()
+    ctx.invoke(run, a, r)
+    dt = time.time() - t0
+    out = DeviceArray(device, r.get_as_object(0, HalBufferView), implicit_host_transfer=True).to_host()
+    n = int(r.get_variant(1))
+    reply = tokenizer.decode(out[:n].tolist())
+    print(reply)
+    print(f"[{n} tok, {len(tokens)} ctx, {dt:.1f}s, {n/dt:.1f} tok/s]")
+    history += reply + "<|im_end|>\n"

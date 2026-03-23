@@ -68,29 +68,20 @@ module @kvcache_components {
     %device = hal.devices.get %c0 : !hal.device
     %allocator = hal.device.allocator<%device : !hal.device> : !hal.allocator
 
-    // Allocate K block pool
-    %memory_type = hal.memory_type<"DeviceLocal"> : i32
-    %buffer_usage = hal.buffer_usage<"TransferSource|TransferTarget|DispatchStorageRead|DispatchStorageWrite"> : i32
-    %k_buffer = hal.allocator.allocate<%allocator : !hal.allocator>
-        affinity(%affinity) type(%memory_type) usage(%buffer_usage) : !hal.buffer{%byte_size}
+    // Create zero-initialized K and V block pools using tensor operations
+    // This ensures the KV cache starts with zeros, preventing garbage reads
+    // on the first decode step (before any K/V has been scattered).
+    %zero = arith.constant 0.0 : !elem_t
+    %k_tensor_init = tensor.empty(%n_blocks, %block_size, %n_head_kv, %head_dim) : tensor<?x?x?x?x!elem_t>
+    %k_tensor = linalg.fill ins(%zero : !elem_t) outs(%k_tensor_init : tensor<?x?x?x?x!elem_t>) -> tensor<?x?x?x?x!elem_t>
+    %k_bv = hal.tensor.export %k_tensor : tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim} -> !hal.buffer_view
 
-    // Create K buffer view [n_blocks, block_size, n_head_kv, head_dim]
-    %element_type = hal.element_type<!elem_t> : i32
-    %encoding_type = hal.encoding_type<dense_row_major> : i32
-    %k_bv = hal.buffer_view.create buffer(%k_buffer : !hal.buffer)[%c0, %byte_size]
-                                   shape([%n_blocks, %block_size, %n_head_kv, %head_dim])
-                                   type(%element_type)
-                                   encoding(%encoding_type) : !hal.buffer_view
-
-    // Allocate V block pool (distinct allocation)
-    %v_buffer = hal.allocator.allocate<%allocator : !hal.allocator>
-        affinity(%affinity) type(%memory_type) usage(%buffer_usage) : !hal.buffer{%byte_size}
-
-    // Create V buffer view
-    %v_bv = hal.buffer_view.create buffer(%v_buffer : !hal.buffer)[%c0, %byte_size]
-                                   shape([%n_blocks, %block_size, %n_head_kv, %head_dim])
-                                   type(%element_type)
-                                   encoding(%encoding_type) : !hal.buffer_view
+    // Barrier prevents CSE from deduplicating K and V cache allocations.
+    // K and V must be SEPARATE buffers — they contain different data after scatter.
+    %v_tensor_init = tensor.empty(%n_blocks, %block_size, %n_head_kv, %head_dim) : tensor<?x?x?x?x!elem_t>
+    %v_tensor_pre = linalg.fill ins(%zero : !elem_t) outs(%v_tensor_init : tensor<?x?x?x?x!elem_t>) -> tensor<?x?x?x?x!elem_t>
+    %v_tensor = util.optimization_barrier %v_tensor_pre : tensor<?x?x?x?x!elem_t>
+    %v_bv = hal.tensor.export %v_tensor : tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim} -> !hal.buffer_view
 
     // Create list and store buffer views
     %this = util.list.create %c2 : !util.list<?>
@@ -148,19 +139,24 @@ module @kvcache_components {
     %context_lens_1d = tensor.collapse_shape %context_lens_layer [[0, 1]]
       : tensor<1x?xi32> into tensor<?xi32>
 
-    // Import K cache
+    // Import K cache with compute barrier to ensure previous scatter completed.
+    // Without the barrier, when @prefill_all runs multiple tokens inside one
+    // ctx.invoke, the import may read stale GPU data from the previous iteration.
     %k_bv = util.list.get %cache[%c0] : !util.list<?> -> !hal.buffer_view
     %n_blocks = hal.buffer_view.dim<%k_bv : !hal.buffer_view>[0] : index
     %block_size = hal.buffer_view.dim<%k_bv : !hal.buffer_view>[1] : index
     %n_head_kv = hal.buffer_view.dim<%k_bv : !hal.buffer_view>[2] : index
     %head_dim = hal.buffer_view.dim<%k_bv : !hal.buffer_view>[3] : index
-    %k_blocks = hal.tensor.import %k_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
+    %k_blocks_raw = hal.tensor.import %k_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
+    %k_blocks = iree_tensor_ext.compute_barrier.start %k_blocks_raw : tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim} -> tensor<?x?x?x?x!elem_t>
 
-    // Import V cache
+    // Import V cache with compute barrier
     %v_bv = util.list.get %cache[%c1] : !util.list<?> -> !hal.buffer_view
-    %v_blocks = hal.tensor.import %v_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
+    %v_blocks_raw = hal.tensor.import %v_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
+    %v_blocks = iree_tensor_ext.compute_barrier.start %v_blocks_raw : tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim} -> tensor<?x?x?x?x!elem_t>
 
     // Allocate output tensors [batch, max_context_len, n_head_kv, head_dim]
+    // When max_context_len=0 (first decode), the dispatch has grid=0 and is skipped.
     %k_init = tensor.empty(%batch, %max_context_len, %n_head_kv, %head_dim) : tensor<?x?x?x?x!elem_t>
     %v_init = tensor.empty(%batch, %max_context_len, %n_head_kv, %head_dim) : tensor<?x?x?x?x!elem_t>
 
@@ -277,11 +273,12 @@ module @kvcache_components {
     %block_tables_2d = tensor.collapse_shape %block_tables_layer [[0, 1], [2]]
       : tensor<1x?x?xi32> into tensor<?x?xi32>
 
-    // Import K cache
+    // Import K cache with barrier
     %k_bv = util.list.get %cache[%c0] : !util.list<?> -> !hal.buffer_view
     %n_blocks = hal.buffer_view.dim<%k_bv : !hal.buffer_view>[0] : index
     %block_size = hal.buffer_view.dim<%k_bv : !hal.buffer_view>[1] : index
-    %k_blocks = hal.tensor.import %k_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
+    %k_blocks_raw = hal.tensor.import %k_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
+    %k_blocks = iree_tensor_ext.compute_barrier.start %k_blocks_raw : tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim} -> tensor<?x?x?x?x!elem_t>
 
     // Scatter K: loop over batch
     %k_updated = scf.for %i = %c0 to %batch_size step %c1
@@ -315,9 +312,10 @@ module @kvcache_components {
     // Export updated K
     %k_updated_bv = hal.tensor.export %k_updated_tied : tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim} -> !hal.buffer_view
 
-    // Import and scatter V
+    // Import and scatter V with barrier
     %v_bv = util.list.get %cache[%c1] : !util.list<?> -> !hal.buffer_view
-    %v_blocks = hal.tensor.import %v_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
+    %v_blocks_raw = hal.tensor.import %v_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim}
+    %v_blocks = iree_tensor_ext.compute_barrier.start %v_blocks_raw : tensor<?x?x?x?x!elem_t>{%n_blocks, %block_size, %n_head_kv, %head_dim} -> tensor<?x?x?x?x!elem_t>
 
     %v_updated = scf.for %i = %c0 to %batch_size step %c1
         iter_args(%cache_v = %v_blocks) -> (tensor<?x?x?x?x!elem_t>) {
@@ -407,11 +405,12 @@ module @kvcache_components {
     %block_tables_2d = tensor.collapse_shape %block_tables_layer [[0, 1], [2]]
       : tensor<1x?x?xi32> into tensor<?x?xi32>
 
-    // Import K cache
+    // Import K cache with barrier
     %k_bv = util.list.get %cache[%c0] : !util.list<?> -> !hal.buffer_view
     %n_blocks = hal.buffer_view.dim<%k_bv : !hal.buffer_view>[0] : index
     %cache_block_size = hal.buffer_view.dim<%k_bv : !hal.buffer_view>[1] : index
-    %k_blocks = hal.tensor.import %k_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %cache_block_size, %n_head_kv, %head_dim}
+    %k_blocks_raw = hal.tensor.import %k_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %cache_block_size, %n_head_kv, %head_dim}
+    %k_blocks = iree_tensor_ext.compute_barrier.start %k_blocks_raw : tensor<?x?x?x?x!elem_t>{%n_blocks, %cache_block_size, %n_head_kv, %head_dim} -> tensor<?x?x?x?x!elem_t>
 
     // Total positions to process (flatten batch * seq_len)
     %total_positions = arith.muli %batch, %seq_len : index
@@ -457,9 +456,10 @@ module @kvcache_components {
     // Export updated K
     %k_updated_bv = hal.tensor.export %k_updated_tied : tensor<?x?x?x?x!elem_t>{%n_blocks, %cache_block_size, %n_head_kv, %head_dim} -> !hal.buffer_view
 
-    // Import and scatter V
+    // Import and scatter V with barrier
     %v_bv = util.list.get %cache[%c1] : !util.list<?> -> !hal.buffer_view
-    %v_blocks = hal.tensor.import %v_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %cache_block_size, %n_head_kv, %head_dim}
+    %v_blocks_raw = hal.tensor.import %v_bv : !hal.buffer_view -> tensor<?x?x?x?x!elem_t>{%n_blocks, %cache_block_size, %n_head_kv, %head_dim}
+    %v_blocks = iree_tensor_ext.compute_barrier.start %v_blocks_raw : tensor<?x?x?x?x!elem_t>{%n_blocks, %cache_block_size, %n_head_kv, %head_dim} -> tensor<?x?x?x?x!elem_t>
 
     %v_updated = scf.for %flat_idx = %c0 to %total_positions step %c1
         iter_args(%cache_v = %v_blocks) -> (tensor<?x?x?x?x!elem_t>) {
