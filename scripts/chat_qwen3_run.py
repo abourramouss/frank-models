@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3-0.6B multi-turn chat via single ctx.invoke per turn."""
+"""Qwen3-0.6B single ctx.invoke inference."""
 import sys, time, numpy as np
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,7 +29,6 @@ def to_bv(arr):
         device=device, buffer=np.ascontiguousarray(arr),
         element_type=HalElementType.SINT_64)
 
-history = ""
 while True:
     try:
         text = input("\n> ")
@@ -37,8 +36,8 @@ while True:
         break
     if not text.strip():
         break
-    history += f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
-    tokens = tokenizer.encode(history).ids
+    prompt = f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
+    tokens = tokenizer.encode(prompt).ids
     a = VmVariantList(4)
     a.push_ref(to_bv(np.array(tokens, dtype=np.int64)))
     a.push_int(len(tokens))
@@ -50,7 +49,5 @@ while True:
     dt = time.time() - t0
     out = DeviceArray(device, r.get_as_object(0, HalBufferView), implicit_host_transfer=True).to_host()
     n = int(r.get_variant(1))
-    reply = tokenizer.decode(out[:n].tolist())
-    print(reply)
-    print(f"[{n} tok, {len(tokens)} ctx, {dt:.1f}s, {n/dt:.1f} tok/s]")
-    history += reply + "<|im_end|>\n"
+    print(tokenizer.decode(out[:n].tolist()))
+    print(f"[{n} tok, {dt:.1f}s, {n/dt:.1f} tok/s]")
