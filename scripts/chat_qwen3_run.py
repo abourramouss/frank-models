@@ -16,6 +16,12 @@ device = get_device("cuda")
 hal = create_hal_module(inst, device)
 pi = ParameterIndex()
 pi.load("/home/bourram/models/qwen3-0.6b-f16-stacked.irpa")
+pi.load("/home/bourram/models/qwen3-output-T.irpa")
+# Also load Q8_0 params if available (for quantized decode path)
+import os
+q8_path = "/home/bourram/models/qwen3-0.6b-q8-stacked.irpa"
+if os.path.exists(q8_path):
+    pi.load(q8_path)
 params = create_io_parameters_module(inst, pi.create_provider(scope="model"))
 with open("/tmp/qwen3_run_SINGLE.vmfb", "rb") as f:
     mod = VmModule.copy_buffer(inst, f.read())
@@ -41,7 +47,7 @@ while True:
     a = VmVariantList(4)
     a.push_ref(to_bv(np.array(tokens, dtype=np.int64)))
     a.push_int(len(tokens))
-    a.push_int(128)
+    a.push_int(256)
     a.push_int(151645)
     r = VmVariantList(2)
     t0 = time.time()

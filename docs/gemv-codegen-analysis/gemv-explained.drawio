@@ -1,0 +1,320 @@
+<mxGraphModel dx="2000" dy="1400" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="3400" pageHeight="2200" math="0" shadow="0">
+  <root>
+    <mxCell id="0"/>
+    <mxCell id="1" parent="0"/>
+
+    <!-- SECTION 1: The GEMV Problem -->
+    <mxCell id="s1_title" value="&lt;b&gt;1. The GEMV Problem&lt;/b&gt;&lt;br&gt;Matrix-Vector Multiply: [1, 1024] x [1024, 2048] = [1, 2048]" style="text;fontSize=16;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+      <mxGeometry x="20" y="10" width="700" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- Input vector -->
+    <mxCell id="s1_input_label" value="&lt;b&gt;Input Vector&lt;/b&gt;&lt;br&gt;[1024] f16" style="text;fontSize=12;align=center;" vertex="1" parent="1">
+      <mxGeometry x="20" y="70" width="120" height="40" as="geometry"/>
+    </mxCell>
+    <mxCell id="s1_input" value="" style="rounded=0;fillColor=#fff2cc;strokeColor=#d6b656;whiteSpace=wrap;" vertex="1" parent="1">
+      <mxGeometry x="20" y="110" width="600" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="s1_input_vals" value="x[0]  x[1]  x[2]  ...  x[1023]" style="text;fontSize=10;align=center;fontStyle=2;" vertex="1" parent="1">
+      <mxGeometry x="20" y="112" width="600" height="26" as="geometry"/>
+    </mxCell>
+
+    <!-- Weight matrix -->
+    <mxCell id="s1_weight_label" value="&lt;b&gt;Weight Matrix&lt;/b&gt;&lt;br&gt;[1024 x 2048] f16&lt;br&gt;~4MB" style="text;fontSize=12;align=center;" vertex="1" parent="1">
+      <mxGeometry x="640" y="70" width="120" height="50" as="geometry"/>
+    </mxCell>
+    <mxCell id="s1_weight" value="" style="rounded=0;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+      <mxGeometry x="20" y="170" width="600" height="200" as="geometry"/>
+    </mxCell>
+    <mxCell id="s1_w_text" value="W[0,0]  W[0,1]  ...  W[0,2047]&lt;br&gt;W[1,0]  W[1,1]  ...  W[1,2047]&lt;br&gt;...&lt;br&gt;W[1023,0]  ...  W[1023,2047]" style="text;fontSize=10;align=center;fontStyle=2;verticalAlign=middle;" vertex="1" parent="1">
+      <mxGeometry x="20" y="170" width="600" height="200" as="geometry"/>
+    </mxCell>
+
+    <!-- Column highlights -->
+    <mxCell id="s1_col0" value="" style="rounded=0;fillColor=#b8d4a8;strokeColor=#82b366;opacity=60;" vertex="1" parent="1">
+      <mxGeometry x="30" y="170" width="15" height="200" as="geometry"/>
+    </mxCell>
+    <mxCell id="s1_col1" value="" style="rounded=0;fillColor=#b8d4a8;strokeColor=#82b366;opacity=60;" vertex="1" parent="1">
+      <mxGeometry x="50" y="170" width="15" height="200" as="geometry"/>
+    </mxCell>
+    <mxCell id="s1_col2" value="" style="rounded=0;fillColor=#b8d4a8;strokeColor=#82b366;opacity=60;" vertex="1" parent="1">
+      <mxGeometry x="70" y="170" width="15" height="200" as="geometry"/>
+    </mxCell>
+
+    <!-- Output vector -->
+    <mxCell id="s1_output_label" value="&lt;b&gt;Output Vector&lt;/b&gt; [2048] f16" style="text;fontSize=12;align=center;" vertex="1" parent="1">
+      <mxGeometry x="20" y="390" width="200" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="s1_output" value="" style="rounded=0;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+      <mxGeometry x="20" y="420" width="600" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="s1_out_vals" value="y[0]  y[1]  y[2]  ...  y[2047]" style="text;fontSize=10;align=center;fontStyle=2;" vertex="1" parent="1">
+      <mxGeometry x="20" y="422" width="600" height="26" as="geometry"/>
+    </mxCell>
+
+    <!-- Arrows: input x column = output -->
+    <mxCell id="s1_arrow1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#d6b656;strokeWidth=2;exitX=0.05;exitY=1;entryX=0.05;entryY=0;" edge="1" source="s1_input" target="s1_weight" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="s1_arrow2" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;strokeWidth=2;exitX=0.05;exitY=1;entryX=0.05;entryY=0;" edge="1" source="s1_weight" target="s1_output" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <!-- Key insight -->
+    <mxCell id="s1_insight" value="&lt;b&gt;Key insight:&lt;/b&gt; Every output element y[n] = dot(input, column_n)&lt;br&gt;&lt;font color=&quot;#cc0000&quot;&gt;Every output needs the SAME input vector!&lt;/font&gt;" style="text;fontSize=13;align=center;whiteSpace=wrap;fillColor=#fff2cc;strokeColor=#d6b656;rounded=1;" vertex="1" parent="1">
+      <mxGeometry x="20" y="470" width="600" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- =========================================================== -->
+    <!-- SECTION 2: What IREE Does (BAD) -->
+    <!-- =========================================================== -->
+    <mxCell id="s2_title" value="&lt;b&gt;&lt;font color=&quot;#cc0000&quot;&gt;2. What IREE Does (BAD)&lt;/font&gt;&lt;/b&gt;" style="text;fontSize=16;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+      <mxGeometry x="750" y="10" width="600" height="30" as="geometry"/>
+    </mxCell>
+
+    <!-- IREE config box -->
+    <mxCell id="s2_config" value="&lt;b&gt;IREE Lowering Config:&lt;/b&gt;&lt;br&gt;&lt;font face=&quot;monospace&quot; size=&quot;2&quot;&gt;workgroup_size = [32, 1, 1]&lt;br&gt;workgroup = [1, 0, 0]&lt;br&gt;thread = [0, 1, 8]&lt;br&gt;partial_reduction = [0, 32, 0]&lt;/font&gt;" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;whiteSpace=wrap;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="750" y="40" width="260" height="90" as="geometry"/>
+    </mxCell>
+
+    <!-- Translation box -->
+    <mxCell id="s2_meaning" value="&lt;b&gt;What this means:&lt;/b&gt;&lt;br&gt;&lt;font face=&quot;monospace&quot; size=&quot;2&quot;&gt;workgroup_size=[32,1,1]&lt;/font&gt; = 32 threads/block (1 warp)&lt;br&gt;&lt;font face=&quot;monospace&quot; size=&quot;2&quot;&gt;workgroup=[1,0,0]&lt;/font&gt; = 1 output per block&lt;br&gt;&lt;font face=&quot;monospace&quot; size=&quot;2&quot;&gt;thread=[0,1,8]&lt;/font&gt; = each thread: 8 multiply-adds&lt;br&gt;&lt;font face=&quot;monospace&quot; size=&quot;2&quot;&gt;partial_reduction=[0,32,0]&lt;/font&gt; = 32 threads shuffle-reduce" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;whiteSpace=wrap;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="1020" y="40" width="330" height="90" as="geometry"/>
+    </mxCell>
+
+    <!-- SM diagram -->
+    <mxCell id="s2_sm" value="&lt;b&gt;SM (Streaming Multiprocessor)&lt;/b&gt;&lt;br&gt;Capacity: 2048 threads / 64 warps" style="swimlane;startSize=40;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="750" y="150" width="600" height="200" as="geometry"/>
+    </mxCell>
+
+    <!-- Shared memory (empty/unused) -->
+    <mxCell id="s2_shmem" value="Shared Memory (48KB)&lt;br&gt;&lt;font color=&quot;#999999&quot;&gt;UNUSED!&lt;/font&gt;" style="rounded=1;fillColor=#e0e0e0;strokeColor=#999999;fontSize=10;dashed=1;" vertex="1" parent="s2_sm">
+      <mxGeometry x="420" y="50" width="160" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- Thread slots visualization -->
+    <mxCell id="s2_slots_label" value="Thread Slots (2048 total):" style="text;fontSize=10;align=left;" vertex="1" parent="s2_sm">
+      <mxGeometry x="10" y="45" width="200" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- Block 0: tiny red box -->
+    <mxCell id="s2_block0" value="Block 0&lt;br&gt;32 threads&lt;br&gt;(1 warp)" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=9;fontStyle=1;whiteSpace=wrap;" vertex="1" parent="s2_sm">
+      <mxGeometry x="10" y="70" width="70" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- Block 1: tiny red box -->
+    <mxCell id="s2_block1" value="Block 1&lt;br&gt;32 threads&lt;br&gt;(1 warp)" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=9;fontStyle=1;whiteSpace=wrap;" vertex="1" parent="s2_sm">
+      <mxGeometry x="90" y="70" width="70" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- Empty space showing waste -->
+    <mxCell id="s2_empty" value="... 2016 threads IDLE (98.4%) ..." style="rounded=1;fillColor=#ffffff;strokeColor=#cc0000;fontSize=10;fontColor=#cc0000;dashed=1;whiteSpace=wrap;" vertex="1" parent="s2_sm">
+      <mxGeometry x="170" y="70" width="240" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- What each block does -->
+    <mxCell id="s2_block0_work" value="Block 0: computes y[0] only" style="text;fontSize=9;fontColor=#b85450;align=center;" vertex="1" parent="s2_sm">
+      <mxGeometry x="10" y="125" width="140" height="20" as="geometry"/>
+    </mxCell>
+    <mxCell id="s2_block1_work" value="Block 1: computes y[1] only" style="text;fontSize=9;fontColor=#b85450;align=center;" vertex="1" parent="s2_sm">
+      <mxGeometry x="90" y="145" width="140" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- Global memory -->
+    <mxCell id="s2_gmem" value="&lt;b&gt;Global Memory (DRAM)&lt;/b&gt;&lt;br&gt;Input vector: 1024 x f16 = 2KB" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;whiteSpace=wrap;" vertex="1" parent="1">
+      <mxGeometry x="750" y="380" width="600" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- Red arrows: each block loads input from global memory -->
+    <mxCell id="s2_load0" value="load 2KB" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#cc0000;strokeWidth=3;fontSize=9;fontColor=#cc0000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="800" y="380" as="sourcePoint"/>
+        <mxPoint x="800" y="350" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="s2_load1" value="load 2KB" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#cc0000;strokeWidth=3;fontSize=9;fontColor=#cc0000;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="880" y="380" as="sourcePoint"/>
+        <mxPoint x="880" y="350" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="s2_load_dots" value="... x2048 blocks" style="text;fontSize=10;fontColor=#cc0000;fontStyle=1;align=center;" vertex="1" parent="1">
+      <mxGeometry x="920" y="358" width="120" height="20" as="geometry"/>
+    </mxCell>
+
+    <!-- Waste summary -->
+    <mxCell id="s2_waste" value="&lt;font color=&quot;#cc0000&quot;&gt;&lt;b&gt;Total input reads: 2048 blocks x 2KB = 4MB&lt;br&gt;But input is only 2KB! That is 2048x redundant.&lt;br&gt;Result: 1.29ms per GEMV&lt;/b&gt;&lt;/font&gt;" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;whiteSpace=wrap;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="750" y="440" width="600" height="60" as="geometry"/>
+    </mxCell>
+
+    <!-- =========================================================== -->
+    <!-- SECTION 3: What cuBLAS Does (GOOD) -->
+    <!-- =========================================================== -->
+    <mxCell id="s3_title" value="&lt;b&gt;&lt;font color=&quot;#006600&quot;&gt;3. What cuBLAS Does (GOOD)&lt;/font&gt;&lt;/b&gt;" style="text;fontSize=16;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+      <mxGeometry x="20" y="550" width="600" height="30" as="geometry"/>
+    </mxCell>
+
+    <!-- Better config box -->
+    <mxCell id="s3_config" value="&lt;b&gt;Better Lowering Config:&lt;/b&gt;&lt;br&gt;&lt;font face=&quot;monospace&quot; size=&quot;2&quot;&gt;workgroup_size = [256, 1, 1]&lt;br&gt;workgroup = [4, 0, 0]&lt;br&gt;+ shared memory for input vector&lt;/font&gt;" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;whiteSpace=wrap;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="20" y="585" width="280" height="80" as="geometry"/>
+    </mxCell>
+
+    <!-- Translation -->
+    <mxCell id="s3_meaning" value="&lt;b&gt;What this means:&lt;/b&gt;&lt;br&gt;256 threads = 8 warps per block&lt;br&gt;4 outputs per block = 64 threads per output&lt;br&gt;Input loaded ONCE into shared memory&lt;br&gt;All 4 output groups share it" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;whiteSpace=wrap;align=left;spacingLeft=10;fontSize=11;" vertex="1" parent="1">
+      <mxGeometry x="320" y="585" width="300" height="80" as="geometry"/>
+    </mxCell>
+
+    <!-- SM diagram -->
+    <mxCell id="s3_sm" value="&lt;b&gt;SM (Streaming Multiprocessor)&lt;/b&gt;&lt;br&gt;Capacity: 2048 threads / 64 warps" style="swimlane;startSize=40;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="20" y="690" width="600" height="220" as="geometry"/>
+    </mxCell>
+
+    <!-- Shared memory with input vector -->
+    <mxCell id="s3_shmem" value="&lt;b&gt;Shared Memory&lt;/b&gt;&lt;br&gt;Input vector [1024] = 2KB&lt;br&gt;&lt;font color=&quot;#006600&quot;&gt;Loaded ONCE, shared by all threads&lt;/font&gt;" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;whiteSpace=wrap;" vertex="1" parent="s3_sm">
+      <mxGeometry x="10" y="50" width="580" height="40" as="geometry"/>
+    </mxCell>
+
+    <!-- Large block with 4 thread groups -->
+    <mxCell id="s3_block" value="&lt;b&gt;Block 0: 256 threads (8 warps)&lt;/b&gt;" style="swimlane;startSize=25;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="s3_sm">
+      <mxGeometry x="10" y="100" width="580" height="100" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="s3_grp0" value="64 threads&lt;br&gt;compute y[0]" style="rounded=1;fillColor=#b8d4a8;strokeColor=#82b366;fontSize=9;fontStyle=1;whiteSpace=wrap;" vertex="1" parent="s3_block">
+      <mxGeometry x="10" y="30" width="130" height="55" as="geometry"/>
+    </mxCell>
+    <mxCell id="s3_grp1" value="64 threads&lt;br&gt;compute y[1]" style="rounded=1;fillColor=#b8d4a8;strokeColor=#82b366;fontSize=9;fontStyle=1;whiteSpace=wrap;" vertex="1" parent="s3_block">
+      <mxGeometry x="150" y="30" width="130" height="55" as="geometry"/>
+    </mxCell>
+    <mxCell id="s3_grp2" value="64 threads&lt;br&gt;compute y[2]" style="rounded=1;fillColor=#b8d4a8;strokeColor=#82b366;fontSize=9;fontStyle=1;whiteSpace=wrap;" vertex="1" parent="s3_block">
+      <mxGeometry x="290" y="30" width="130" height="55" as="geometry"/>
+    </mxCell>
+    <mxCell id="s3_grp3" value="64 threads&lt;br&gt;compute y[3]" style="rounded=1;fillColor=#b8d4a8;strokeColor=#82b366;fontSize=9;fontStyle=1;whiteSpace=wrap;" vertex="1" parent="s3_block">
+      <mxGeometry x="430" y="30" width="130" height="55" as="geometry"/>
+    </mxCell>
+
+    <!-- Arrows from shmem to thread groups -->
+    <mxCell id="s3_read0" value="" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#006600;strokeWidth=1;dashed=1;" edge="1" parent="s3_sm">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="80" y="90" as="sourcePoint"/>
+        <mxPoint x="80" y="130" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="s3_read1" value="" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#006600;strokeWidth=1;dashed=1;" edge="1" parent="s3_sm">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="220" y="90" as="sourcePoint"/>
+        <mxPoint x="220" y="130" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="s3_read2" value="" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#006600;strokeWidth=1;dashed=1;" edge="1" parent="s3_sm">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="370" y="90" as="sourcePoint"/>
+        <mxPoint x="370" y="130" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="s3_read3" value="" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#006600;strokeWidth=1;dashed=1;" edge="1" parent="s3_sm">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="510" y="90" as="sourcePoint"/>
+        <mxPoint x="510" y="130" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- Global memory -->
+    <mxCell id="s3_gmem" value="&lt;b&gt;Global Memory (DRAM)&lt;/b&gt;&lt;br&gt;Input vector: 2KB" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;whiteSpace=wrap;" vertex="1" parent="1">
+      <mxGeometry x="20" y="930" width="600" height="50" as="geometry"/>
+    </mxCell>
+
+    <!-- ONE green arrow -->
+    <mxCell id="s3_load" value="load 2KB ONCE" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#006600;strokeWidth=4;fontSize=10;fontColor=#006600;fontStyle=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="320" y="930" as="sourcePoint"/>
+        <mxPoint x="320" y="910" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <!-- Good summary -->
+    <mxCell id="s3_good" value="&lt;font color=&quot;#006600&quot;&gt;&lt;b&gt;Total input reads: 512 blocks x 2KB = 1MB (4x less)&lt;br&gt;Each block computes 4 outputs sharing 1 input load&lt;br&gt;Result: ~0.02ms per GEMV&lt;/b&gt;&lt;/font&gt;" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;whiteSpace=wrap;fontSize=12;" vertex="1" parent="1">
+      <mxGeometry x="20" y="990" width="600" height="60" as="geometry"/>
+    </mxCell>
+
+    <!-- =========================================================== -->
+    <!-- SECTION 4: The Numbers -->
+    <!-- =========================================================== -->
+    <mxCell id="s4_title" value="&lt;b&gt;4. The Numbers&lt;/b&gt;" style="text;fontSize=16;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+      <mxGeometry x="750" y="550" width="600" height="30" as="geometry"/>
+    </mxCell>
+
+    <!-- Comparison table -->
+    <mxCell id="s4_header" value="" style="rounded=1;fillColor=#333333;strokeColor=#333333;" vertex="1" parent="1">
+      <mxGeometry x="750" y="590" width="600" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_h_text" value="&lt;font color=&quot;#ffffff&quot;&gt;&lt;b&gt;Metric                           IREE (current)                cuBLAS&lt;/b&gt;&lt;/font&gt;" style="text;fontSize=12;align=center;whiteSpace=wrap;" vertex="1" parent="1">
+      <mxGeometry x="750" y="593" width="600" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="s4_row1" value="" style="rounded=0;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+      <mxGeometry x="750" y="625" width="300" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_row1g" value="" style="rounded=0;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+      <mxGeometry x="1050" y="625" width="300" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_r1" value="Threads/block:       &lt;b&gt;32&lt;/b&gt;                                           &lt;b&gt;256&lt;/b&gt;" style="text;fontSize=11;align=center;" vertex="1" parent="1">
+      <mxGeometry x="750" y="628" width="600" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="s4_row2" value="" style="rounded=0;fillColor=#fce5cd;strokeColor=#d6b656;" vertex="1" parent="1">
+      <mxGeometry x="750" y="660" width="300" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_row2g" value="" style="rounded=0;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+      <mxGeometry x="1050" y="660" width="300" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_r2" value="Total blocks:          &lt;b&gt;2048&lt;/b&gt;                                        &lt;b&gt;512&lt;/b&gt;" style="text;fontSize=11;align=center;" vertex="1" parent="1">
+      <mxGeometry x="750" y="663" width="600" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="s4_row3" value="" style="rounded=0;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+      <mxGeometry x="750" y="695" width="300" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_row3g" value="" style="rounded=0;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+      <mxGeometry x="1050" y="695" width="300" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_r3" value="Input vector reads:  &lt;b&gt;4MB&lt;/b&gt; (2048x redundant)        &lt;b&gt;1MB&lt;/b&gt; (4x reuse)" style="text;fontSize=11;align=center;" vertex="1" parent="1">
+      <mxGeometry x="750" y="698" width="600" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="s4_row4" value="" style="rounded=0;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+      <mxGeometry x="750" y="730" width="300" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_row4g" value="" style="rounded=0;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+      <mxGeometry x="1050" y="730" width="300" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_r4" value="SM occupancy:       &lt;b&gt;1.6%&lt;/b&gt;                                       &lt;b&gt;25%&lt;/b&gt;" style="text;fontSize=11;align=center;" vertex="1" parent="1">
+      <mxGeometry x="750" y="733" width="600" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="s4_row5" value="" style="rounded=0;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+      <mxGeometry x="750" y="765" width="300" height="40" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_row5g" value="" style="rounded=0;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+      <mxGeometry x="1050" y="765" width="300" height="40" as="geometry"/>
+    </mxCell>
+    <mxCell id="s4_r5" value="&lt;b&gt;Time:                    1.29ms                                    ~0.02ms&lt;/b&gt;" style="text;fontSize=13;align=center;" vertex="1" parent="1">
+      <mxGeometry x="750" y="768" width="600" height="35" as="geometry"/>
+    </mxCell>
+
+    <!-- Speedup callout -->
+    <mxCell id="s4_speedup" value="&lt;font size=&quot;5&quot;&gt;&lt;b&gt;65x slower&lt;/b&gt;&lt;/font&gt;&lt;br&gt;&lt;br&gt;This single issue accounts for the&lt;br&gt;entire gap between IREE (6.1 tok/s)&lt;br&gt;and llama.cpp (49 tok/s)" style="rounded=1;fillColor=#f8cecc;strokeColor=#cc0000;whiteSpace=wrap;fontSize=12;align=center;" vertex="1" parent="1">
+      <mxGeometry x="800" y="830" width="500" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- =========================================================== -->
+    <!-- SECTION: Data flow detail (between sections 2 and 3) -->
+    <!-- =========================================================== -->
+    <mxCell id="flow_title" value="&lt;b&gt;How 32 threads reduce 1024 elements (per block):&lt;/b&gt;" style="text;fontSize=12;align=left;fontColor=#666666;" vertex="1" parent="1">
+      <mxGeometry x="750" y="510" width="400" height="25" as="geometry"/>
+    </mxCell>
+    <mxCell id="flow_detail" value="32 threads x 8 elements = 256 per iteration x 4 iterations = 1024 total&lt;br&gt;Then 5 rounds of warp shuffle to combine 32 partial sums into 1 result" style="text;fontSize=10;align=left;fontColor=#999999;whiteSpace=wrap;" vertex="1" parent="1">
+      <mxGeometry x="750" y="530" width="600" height="30" as="geometry"/>
+    </mxCell>
+
+  </root>
+</mxGraphModel>
