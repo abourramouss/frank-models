@@ -21,7 +21,10 @@ module @llm_inference_qwen {
   util.global private mutable @max_seq_len = 0 : index
   util.global private mutable @current_pos = 0 : index
   util.global private mutable @is_initialized = 0 : i1
-  // (global KV cache tensors removed — @generate now takes K/V as tensor args)
+  // ---- Fixed-size KV cache globals (no import/export sync needed) ----
+  // 512 max tokens × 28 layers = 14336 slots × [8 heads, 128 dim] × f16
+  util.global private mutable @g_k_cache = #util.uninitialized : tensor<14336x8x128xf16>
+  util.global private mutable @g_v_cache = #util.uninitialized : tensor<14336x8x128xf16>
 
   util.func private @hparams.vocab_size() -> i64 {
     %c151936_i64 = arith.constant 151936 : i64
@@ -1323,8 +1326,8 @@ module @llm_inference_qwen {
     %logits_dyn = tensor.cast %logits : tensor<1x151936xf16> to tensor<?x?xf16>
     util.return %logits_dyn, %arg2 : tensor<?x?xf16>, !util.list<?>
   }
-  // ---- generate: static decode loop (tensor K/V args, no list/import/export) ----
-  util.func public @generate(%arg0: i64, %k_cache_in: tensor<?x8x128xf16>, %v_cache_in: tensor<?x8x128xf16>, %max_seq_len_val: index, %arg3: index, %arg4: i64, %arg5: i64, %total_dim: index) -> (tensor<?xi64>, index, tensor<?x8x128xf16>, tensor<?x8x128xf16>) {
+  // ---- generate: static decode loop ----
+  util.func public @generate(%arg0: i64, %arg1: !util.list<?>, %max_seq_len_val: index, %arg3: index, %arg4: i64, %arg5: i64) -> (tensor<?xi64>, index, !util.list<?>) {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c0_i64 = arith.constant 0 : i64
@@ -1339,109 +1342,129 @@ module @llm_inference_qwen {
     %output_norm_dyn = util.call @model_params.output_norm_weight() : () -> tensor<?xf16>
     %output_norm = tensor.cast %output_norm_dyn : tensor<?xf16> to tensor<1024xf16>
     %output_wt_gen = util.call @model_params.output_weight_T() : () -> tensor<151936x1024xf16>
+    // Batched generation: inner scf.for of 16 tokens (no sync), outer scf.while checks EOS.
+    %c_batch = arith.constant 1 : index
     %17 = tensor.empty(%arg3) : tensor<?xi64>
     %18 = linalg.fill ins(%c0_i64 : i64) outs(%17 : tensor<?xi64>) -> tensor<?xi64>
     %start_ctx = arith.index_cast %arg5 : i64 to index
-    // Tie shape on input K/V tensors to maintain dynamic dim info
-    %k_in_tied = flow.tensor.tie_shape %k_cache_in : tensor<?x8x128xf16>{%total_dim}
-    %v_in_tied = flow.tensor.tie_shape %v_cache_in : tensor<?x8x128xf16>{%total_dim}
-    // Single while loop: one token per iteration, no inner scf.for
-    %20:7 = scf.while (%arg6 = %arg0, %arg7 = %start_ctx, %arg9 = %18, %arg10 = %c0, %arg_not_eos = %true, %wkc = %k_in_tied, %wvc = %v_in_tied) : (i64, index, tensor<?xi64>, index, i1, tensor<?x8x128xf16>, tensor<?x8x128xf16>) -> (i64, index, tensor<?xi64>, index, i1, tensor<?x8x128xf16>, tensor<?x8x128xf16>) {
+    %20:6 = scf.while (%arg6 = %arg0, %arg7 = %start_ctx, %arg8 = %arg1, %arg9 = %18, %arg10 = %c0, %arg_not_eos = %true) : (i64, index, !util.list<?>, tensor<?xi64>, index, i1) -> (i64, index, !util.list<?>, tensor<?xi64>, index, i1) {
       %still_count = arith.cmpi ult, %arg10, %arg3 : index
       %still_going = arith.andi %still_count, %arg_not_eos : i1
-      scf.condition(%still_going) %arg6, %arg7, %arg9, %arg10, %arg_not_eos, %wkc, %wvc : i64, index, tensor<?xi64>, index, i1, tensor<?x8x128xf16>, tensor<?x8x128xf16>
+      scf.condition(%still_going) %arg6, %arg7, %arg8, %arg9, %arg10, %arg_not_eos : i64, index, !util.list<?>, tensor<?xi64>, index, i1
     } do {
-    ^bb0(%arg6: i64, %arg7: index, %arg9: tensor<?xi64>, %arg10: index, %arg_ne: i1, %w_kc: tensor<?x8x128xf16>, %w_vc: tensor<?x8x128xf16>):
-      // Prepare token and position tensors
-      %tok_tensor = tensor.from_elements %arg6 : tensor<1xi64>
+    ^bb0(%arg6: i64, %arg7: index, %arg8: !util.list<?>, %arg9: tensor<?xi64>, %arg10: index, %arg_ne: i1):
+      // Compute batch size: min(16, remaining)
+      %remaining = arith.subi %arg3, %arg10 : index
+      %batch_size = arith.minui %remaining, %c_batch : index
+      // Inner batch: generate batch_size tokens
+      // Prepare initial token and position as tensors
+      %init_tok_tensor = tensor.from_elements %arg6 : tensor<1xi64>
       %pos_as_i64 = arith.index_cast %arg7 : index to i64
-      %pos_tensor = tensor.from_elements %pos_as_i64 : tensor<1xi64>
-      // Embedding
-      %tok_dyn = tensor.cast %tok_tensor : tensor<1xi64> to tensor<?xi64>
-      %embd_dyn = util.call @embedding_components.embedding_lookup_1d(%embd_w_dyn, %tok_dyn) : (tensor<?x?xf16>, tensor<?xi64>) -> tensor<?x?xf16>
-      %embd = tensor.cast %embd_dyn : tensor<?x?xf16> to tensor<1x1024xf16>
-      // Tie shape on K/V to maintain dynamic dim info through while iter_args
-      %kc_tied = flow.tensor.tie_shape %w_kc : tensor<?x8x128xf16>{%total_dim}
-      %vc_tied = flow.tensor.tie_shape %w_vc : tensor<?x8x128xf16>{%total_dim}
-      // Layer loop — pure tensor K/V, no import/export/list
-      %layer_result:3 = scf.for %arg12 = %c0 to %c28 step %c1 iter_args(%h = %embd, %kc_l = %kc_tied, %vc_l = %vc_tied) -> (tensor<1x1024xf16>, tensor<?x8x128xf16>, tensor<?x8x128xf16>) {
-        %li32 = arith.index_cast %arg12 : index to i32
-        %lo:3 = util.call @transformer_layer_decode_static(%h, %pos_tensor, %kc_l, %vc_l, %max_seq_len_val, %arg7, %li32) : (tensor<1x1024xf16>, tensor<1xi64>, tensor<?x8x128xf16>, tensor<?x8x128xf16>, index, index, i32) -> (tensor<1x1024xf16>, tensor<?x8x128xf16>, tensor<?x8x128xf16>)
-        %lo_k_tied = flow.tensor.tie_shape %lo#1 : tensor<?x8x128xf16>{%total_dim}
-        %lo_v_tied = flow.tensor.tie_shape %lo#2 : tensor<?x8x128xf16>{%total_dim}
-        scf.yield %lo#0, %lo_k_tied, %lo_v_tied : tensor<1x1024xf16>, tensor<?x8x128xf16>, tensor<?x8x128xf16>
+      %init_pos_tensor = tensor.from_elements %pos_as_i64 : tensor<1xi64>
+      // Offset for position increments (CPU-side counter, no GPU sync needed)
+      %inner:5 = scf.for %bi = %c0 to %batch_size step %c1
+          iter_args(%tok_t = %init_tok_tensor, %ctx_len_v = %arg7, %out_toks = %arg9, %out_idx = %arg10, %pos_t = %init_pos_tensor)
+          -> (tensor<1xi64>, index, tensor<?xi64>, index, tensor<1xi64>) {
+        // Embedding — tok_t is already tensor<1xi64>, no extract needed
+        %tok_dyn = tensor.cast %tok_t : tensor<1xi64> to tensor<?xi64>
+        %embd_dyn = util.call @embedding_components.embedding_lookup_1d(%embd_w_dyn, %tok_dyn) : (tensor<?x?xf16>, tensor<?xi64>) -> tensor<?x?xf16>
+        %embd = tensor.cast %embd_dyn : tensor<?x?xf16> to tensor<1x1024xf16>
+        // Unpack K/V from list
+        %k_bv_g = util.list.get %arg8[%c0] : !util.list<?> -> !hal.buffer_view
+        %v_bv_g = util.list.get %arg8[%c1] : !util.list<?> -> !hal.buffer_view
+        %total_g = hal.buffer_view.dim<%k_bv_g : !hal.buffer_view>[0] : index
+        %k_dyn = hal.tensor.import %k_bv_g : !hal.buffer_view -> tensor<?x8x128xf16>{%total_g}
+        %v_dyn = hal.tensor.import %v_bv_g : !hal.buffer_view -> tensor<?x8x128xf16>{%total_g}
+        // Layer loop
+        %layer_result:3 = scf.for %arg12 = %c0 to %c28 step %c1 iter_args(%h = %embd, %kc = %k_dyn, %vc = %v_dyn) -> (tensor<1x1024xf16>, tensor<?x8x128xf16>, tensor<?x8x128xf16>) {
+          %li32 = arith.index_cast %arg12 : index to i32
+          %lo:3 = util.call @transformer_layer_decode_static(%h, %pos_t, %kc, %vc, %max_seq_len_val, %ctx_len_v, %li32) : (tensor<1x1024xf16>, tensor<1xi64>, tensor<?x8x128xf16>, tensor<?x8x128xf16>, index, index, i32) -> (tensor<1x1024xf16>, tensor<?x8x128xf16>, tensor<?x8x128xf16>)
+          scf.yield %lo#0, %lo#1, %lo#2 : tensor<1x1024xf16>, tensor<?x8x128xf16>, tensor<?x8x128xf16>
+        }
+        // Repack K/V
+        %k_bv_gp = hal.tensor.export %layer_result#1 : tensor<?x8x128xf16>{%total_g} -> !hal.buffer_view
+        %v_bv_gp = hal.tensor.export %layer_result#2 : tensor<?x8x128xf16>{%total_g} -> !hal.buffer_view
+        util.list.set %arg8[%c0], %k_bv_gp : !hal.buffer_view -> !util.list<?>
+        util.list.set %arg8[%c1], %v_bv_gp : !hal.buffer_view -> !util.list<?>
+        // Norm + transposed vocab projection
+        %normed = util.call @rms_norm_1x1024(%layer_result#0, %output_norm, %eps) : (tensor<1x1024xf16>, tensor<1024xf16>, f32) -> tensor<1x1024xf16>
+        %xt_init = tensor.empty() : tensor<1024x1xf16>
+        %normed_t = linalg.generic {
+          indexing_maps = [affine_map<(d0, d1) -> (d1, d0)>, affine_map<(d0, d1) -> (d0, d1)>],
+          iterator_types = ["parallel", "parallel"]
+        } ins(%normed : tensor<1x1024xf16>) outs(%xt_init : tensor<1024x1xf16>) {
+        ^bb0(%in: f16, %out: f16):
+          linalg.yield %in : f16
+        } -> tensor<1024x1xf16>
+        %lt_init = tensor.empty() : tensor<151936x1xf16>
+        %lt_zero = linalg.fill ins(%cst : f16) outs(%lt_init : tensor<151936x1xf16>) -> tensor<151936x1xf16>
+        %lt = linalg.matmul ins(%output_wt_gen, %normed_t : tensor<151936x1024xf16>, tensor<1024x1xf16>) outs(%lt_zero : tensor<151936x1xf16>) -> tensor<151936x1xf16>
+        %lt_flat = tensor.collapse_shape %lt [[0, 1]] : tensor<151936x1xf16> into tensor<151936xf16>
+        // Tiled argmax
+        %cst_4 = arith.constant 0xFC00 : f16
+        %c_neg1 = arith.constant -1 : i64
+        %c256_am = arith.constant 256 : index
+        %pad_init = tensor.empty() : tensor<152064xf16>
+        %pad_fill = linalg.fill ins(%cst_4 : f16) outs(%pad_init : tensor<152064xf16>) -> tensor<152064xf16>
+        %padded = tensor.insert_slice %lt_flat into %pad_fill[0] [151936] [1] : tensor<151936xf16> into tensor<152064xf16>
+        %reshaped_am = tensor.expand_shape %padded [[0, 1]] output_shape [594, 256] : tensor<152064xf16> into tensor<594x256xf16>
+        %v1_init = tensor.empty() : tensor<594xf16>
+        %i1_init = tensor.empty() : tensor<594xi64>
+        %v1_fill = linalg.fill ins(%cst_4 : f16) outs(%v1_init : tensor<594xf16>) -> tensor<594xf16>
+        %i1_fill = linalg.fill ins(%c_neg1 : i64) outs(%i1_init : tensor<594xi64>) -> tensor<594xi64>
+        %p1:2 = linalg.generic {
+          indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>],
+          iterator_types = ["parallel", "reduction"]
+        } ins(%reshaped_am : tensor<594x256xf16>) outs(%v1_fill, %i1_fill : tensor<594xf16>, tensor<594xi64>) {
+        ^bb0(%in: f16, %ov: f16, %oi: i64):
+          %d0 = linalg.index 0 : index
+          %d1 = linalg.index 1 : index
+          %g = arith.muli %d0, %c256_am : index
+          %g2 = arith.addi %g, %d1 : index
+          %gi = arith.index_cast %g2 : index to i64
+          %cmp = arith.cmpf ogt, %in, %ov : f16
+          %nv = arith.select %cmp, %in, %ov : f16
+          %ni = arith.select %cmp, %gi, %oi : i64
+          linalg.yield %nv, %ni : f16, i64
+        } -> (tensor<594xf16>, tensor<594xi64>)
+        %fv_init = tensor.empty() : tensor<f16>
+        %fi_init = tensor.empty() : tensor<i64>
+        %fv = linalg.fill ins(%cst_4 : f16) outs(%fv_init : tensor<f16>) -> tensor<f16>
+        %fi = linalg.fill ins(%c_neg1 : i64) outs(%fi_init : tensor<i64>) -> tensor<i64>
+        %final:2 = linalg.generic {
+          indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>, affine_map<(d0) -> ()>],
+          iterator_types = ["reduction"]
+        } ins(%p1#0, %p1#1 : tensor<594xf16>, tensor<594xi64>) outs(%fv, %fi : tensor<f16>, tensor<i64>) {
+        ^bb0(%iv: f16, %ii: i64, %ov: f16, %oi: i64):
+          %cmp = arith.cmpf ogt, %iv, %ov : f16
+          %nv = arith.select %cmp, %iv, %ov : f16
+          %ni = arith.select %cmp, %ii, %oi : i64
+          linalg.yield %nv, %ni : f16, i64
+        } -> (tensor<f16>, tensor<i64>)
+        %next_tok = tensor.extract %final#1[] : tensor<i64>
+        %next_tok_1d = tensor.expand_shape %final#1 [] output_shape [1] : tensor<i64> into tensor<1xi64>
+        %new_out = tensor.insert %next_tok into %out_toks[%out_idx] : tensor<?xi64>
+        // Increment position (CPU-side) and position tensor (GPU-side)
+        %next_ctx = arith.addi %ctx_len_v, %c1 : index
+        %pos_inc = tensor.empty() : tensor<1xi64>
+        %next_pos_t = linalg.generic {
+          indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>],
+          iterator_types = ["parallel"]
+        } ins(%pos_t : tensor<1xi64>) outs(%pos_inc : tensor<1xi64>) {
+        ^bb0(%in: i64, %out: i64):
+          %inc = arith.addi %in, %c1_i64 : i64
+          linalg.yield %inc : i64
+        } -> tensor<1xi64>
+        %next_idx = arith.addi %out_idx, %c1 : index
+        scf.yield %next_tok_1d, %next_ctx, %new_out, %next_idx, %next_pos_t : tensor<1xi64>, index, tensor<?xi64>, index, tensor<1xi64>
       }
-      // Norm + transposed vocab projection
-      %normed = util.call @rms_norm_1x1024(%layer_result#0, %output_norm, %eps) : (tensor<1x1024xf16>, tensor<1024xf16>, f32) -> tensor<1x1024xf16>
-      %xt_init = tensor.empty() : tensor<1024x1xf16>
-      %normed_t = linalg.generic {
-        indexing_maps = [affine_map<(d0, d1) -> (d1, d0)>, affine_map<(d0, d1) -> (d0, d1)>],
-        iterator_types = ["parallel", "parallel"]
-      } ins(%normed : tensor<1x1024xf16>) outs(%xt_init : tensor<1024x1xf16>) {
-      ^bb0(%in: f16, %out: f16):
-        linalg.yield %in : f16
-      } -> tensor<1024x1xf16>
-      %lt_init = tensor.empty() : tensor<151936x1xf16>
-      %lt_zero = linalg.fill ins(%cst : f16) outs(%lt_init : tensor<151936x1xf16>) -> tensor<151936x1xf16>
-      %lt = linalg.matmul ins(%output_wt_gen, %normed_t : tensor<151936x1024xf16>, tensor<1024x1xf16>) outs(%lt_zero : tensor<151936x1xf16>) -> tensor<151936x1xf16>
-      %lt_flat = tensor.collapse_shape %lt [[0, 1]] : tensor<151936x1xf16> into tensor<151936xf16>
-      // Tiled argmax
-      %cst_4 = arith.constant 0xFC00 : f16
-      %c_neg1 = arith.constant -1 : i64
-      %c256_am = arith.constant 256 : index
-      %pad_init = tensor.empty() : tensor<152064xf16>
-      %pad_fill = linalg.fill ins(%cst_4 : f16) outs(%pad_init : tensor<152064xf16>) -> tensor<152064xf16>
-      %padded = tensor.insert_slice %lt_flat into %pad_fill[0] [151936] [1] : tensor<151936xf16> into tensor<152064xf16>
-      %reshaped_am = tensor.expand_shape %padded [[0, 1]] output_shape [594, 256] : tensor<152064xf16> into tensor<594x256xf16>
-      %v1_init = tensor.empty() : tensor<594xf16>
-      %i1_init = tensor.empty() : tensor<594xi64>
-      %v1_fill = linalg.fill ins(%cst_4 : f16) outs(%v1_init : tensor<594xf16>) -> tensor<594xf16>
-      %i1_fill = linalg.fill ins(%c_neg1 : i64) outs(%i1_init : tensor<594xi64>) -> tensor<594xi64>
-      %p1:2 = linalg.generic {
-        indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0)>, affine_map<(d0, d1) -> (d0)>],
-        iterator_types = ["parallel", "reduction"]
-      } ins(%reshaped_am : tensor<594x256xf16>) outs(%v1_fill, %i1_fill : tensor<594xf16>, tensor<594xi64>) {
-      ^bb0(%in: f16, %ov: f16, %oi: i64):
-        %d0 = linalg.index 0 : index
-        %d1 = linalg.index 1 : index
-        %g = arith.muli %d0, %c256_am : index
-        %g2 = arith.addi %g, %d1 : index
-        %gi = arith.index_cast %g2 : index to i64
-        %cmp = arith.cmpf ogt, %in, %ov : f16
-        %nv = arith.select %cmp, %in, %ov : f16
-        %ni = arith.select %cmp, %gi, %oi : i64
-        linalg.yield %nv, %ni : f16, i64
-      } -> (tensor<594xf16>, tensor<594xi64>)
-      %fv_init = tensor.empty() : tensor<f16>
-      %fi_init = tensor.empty() : tensor<i64>
-      %fv = linalg.fill ins(%cst_4 : f16) outs(%fv_init : tensor<f16>) -> tensor<f16>
-      %fi = linalg.fill ins(%c_neg1 : i64) outs(%fi_init : tensor<i64>) -> tensor<i64>
-      %final:2 = linalg.generic {
-        indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>, affine_map<(d0) -> ()>],
-        iterator_types = ["reduction"]
-      } ins(%p1#0, %p1#1 : tensor<594xf16>, tensor<594xi64>) outs(%fv, %fi : tensor<f16>, tensor<i64>) {
-      ^bb0(%iv: f16, %ii: i64, %ov: f16, %oi: i64):
-        %cmp = arith.cmpf ogt, %iv, %ov : f16
-        %nv = arith.select %cmp, %iv, %ov : f16
-        %ni = arith.select %cmp, %ii, %oi : i64
-        linalg.yield %nv, %ni : f16, i64
-      } -> (tensor<f16>, tensor<i64>)
-      %next_tok = tensor.extract %final#1[] : tensor<i64>
-      %new_out = tensor.insert %next_tok into %arg9[%arg10] : tensor<?xi64>
-      // Increment position and index
-      %next_ctx = arith.addi %arg7, %c1 : index
-      %next_idx = arith.addi %arg10, %c1 : index
       // Check EOS
-      %is_eos = arith.cmpi eq, %next_tok, %arg4 : i64
+      %last_tok_scalar = tensor.extract %inner#0[%c0] : tensor<1xi64>
+      %is_eos = arith.cmpi eq, %last_tok_scalar, %arg4 : i64
       %not_eos = arith.xori %is_eos, %true : i1
-      // Tie shape on K/V results to maintain dynamic dim through while iter_args
-      %while_k_tied = flow.tensor.tie_shape %layer_result#1 : tensor<?x8x128xf16>{%total_dim}
-      %while_v_tied = flow.tensor.tie_shape %layer_result#2 : tensor<?x8x128xf16>{%total_dim}
-      scf.yield %next_tok, %next_ctx, %new_out, %next_idx, %not_eos, %while_k_tied, %while_v_tied : i64, index, tensor<?xi64>, index, i1, tensor<?x8x128xf16>, tensor<?x8x128xf16>
+      scf.yield %last_tok_scalar, %inner#1, %arg8, %inner#2, %inner#3, %not_eos : i64, index, !util.list<?>, tensor<?xi64>, index, i1
     }
-    %ret_k = flow.tensor.tie_shape %20#5 : tensor<?x8x128xf16>{%total_dim}
-    %ret_v = flow.tensor.tie_shape %20#6 : tensor<?x8x128xf16>{%total_dim}
-    util.return %20#2, %20#3, %ret_k, %ret_v : tensor<?xi64>, index, tensor<?x8x128xf16>, tensor<?x8x128xf16>
+    util.return %20#3, %20#4, %20#2 : tensor<?xi64>, index, !util.list<?>
   }
   // Prefill all tokens via scf.for calling @decode for each.
   // This is a SEPARATE function (not inlined into @run) to prevent
@@ -2026,6 +2049,14 @@ module @llm_inference_qwen {
     %c1 = arith.constant 1 : index
     %total = arith.addi %arg1, %arg2 : index
     %cache_init = util.call @allocate_kv_cache(%total) : (index) -> !util.list<?>
+    // Initialize global KV cache tensors (zero-filled)
+    %cst_zero = arith.constant 0.000000e+00 : f16
+    %g_k_init = tensor.empty() : tensor<14336x8x128xf16>
+    %g_k_fill = linalg.fill ins(%cst_zero : f16) outs(%g_k_init : tensor<14336x8x128xf16>) -> tensor<14336x8x128xf16>
+    util.global.store %g_k_fill, @g_k_cache : tensor<14336x8x128xf16>
+    %g_v_init = tensor.empty() : tensor<14336x8x128xf16>
+    %g_v_fill = linalg.fill ins(%cst_zero : f16) outs(%g_v_init : tensor<14336x8x128xf16>) -> tensor<14336x8x128xf16>
+    util.global.store %g_v_fill, @g_v_cache : tensor<14336x8x128xf16>
     // Parallel prefill — processes ALL tokens at once (not one-by-one)
     %prefill:2 = util.call @prefill(%arg0, %arg1, %cache_init, %total, %c0) : (tensor<?xi64>, index, !util.list<?>, index, index) -> (tensor<?x?xf16>, !util.list<?>)
     // Argmax on last prefill logits
@@ -2049,14 +2080,23 @@ module @llm_inference_qwen {
     } -> (tensor<f16>, tensor<i64>)
     %first_tok = tensor.extract %argmax#1[] : tensor<i64>
     %last_pos = arith.index_cast %arg1 : index to i64
-    // Extract K/V tensors from prefill cache list (one-time import)
+    // Copy prefill cache (list) into global tensors for the generate loop
     %pre_k_bv = util.list.get %prefill#1[%c0] : !util.list<?> -> !hal.buffer_view
     %pre_v_bv = util.list.get %prefill#1[%c1] : !util.list<?> -> !hal.buffer_view
     %pre_total = hal.buffer_view.dim<%pre_k_bv : !hal.buffer_view>[0] : index
     %pre_k = hal.tensor.import %pre_k_bv : !hal.buffer_view -> tensor<?x8x128xf16>{%pre_total}
     %pre_v = hal.tensor.import %pre_v_bv : !hal.buffer_view -> tensor<?x8x128xf16>{%pre_total}
-    // Call generate with tensor K/V args (no list/import/export in decode loop)
-    %gen:4 = util.call @generate(%first_tok, %pre_k, %pre_v, %total, %arg2, %arg3, %last_pos, %pre_total) : (i64, tensor<?x8x128xf16>, tensor<?x8x128xf16>, index, index, i64, i64, index) -> (tensor<?xi64>, index, tensor<?x8x128xf16>, tensor<?x8x128xf16>)
+    // Pad to global size (14336) and store
+    %cst_pad = arith.constant 0.000000e+00 : f16
+    %g_k_pad = tensor.empty() : tensor<14336x8x128xf16>
+    %g_k_z = linalg.fill ins(%cst_pad : f16) outs(%g_k_pad : tensor<14336x8x128xf16>) -> tensor<14336x8x128xf16>
+    %g_k_set = tensor.insert_slice %pre_k into %g_k_z[0, 0, 0] [%pre_total, 8, 128] [1, 1, 1] : tensor<?x8x128xf16> into tensor<14336x8x128xf16>
+    util.global.store %g_k_set, @g_k_cache : tensor<14336x8x128xf16>
+    %g_v_pad = tensor.empty() : tensor<14336x8x128xf16>
+    %g_v_z = linalg.fill ins(%cst_pad : f16) outs(%g_v_pad : tensor<14336x8x128xf16>) -> tensor<14336x8x128xf16>
+    %g_v_set = tensor.insert_slice %pre_v into %g_v_z[0, 0, 0] [%pre_total, 8, 128] [1, 1, 1] : tensor<?x8x128xf16> into tensor<14336x8x128xf16>
+    util.global.store %g_v_set, @g_v_cache : tensor<14336x8x128xf16>
+    %gen:3 = util.call @generate(%first_tok, %prefill#1, %total, %arg2, %arg3, %last_pos) : (i64, !util.list<?>, index, index, i64, i64) -> (tensor<?xi64>, index, !util.list<?>)
     util.return %gen#0, %gen#1 : tensor<?xi64>, index
   }
 
@@ -2104,24 +2144,13 @@ module @llm_inference_qwen {
       linalg.yield %nv, %ni : f16, i64
     } -> (tensor<f16>, tensor<i64>)
     %first_tok = tensor.extract %argmax#1[] : tensor<i64>
-    // Extract K/V tensors from prefill cache list (one-time import)
-    %ct_k_bv = util.list.get %pfill#1[%c0] : !util.list<?> -> !hal.buffer_view
-    %ct_v_bv = util.list.get %pfill#1[%c1] : !util.list<?> -> !hal.buffer_view
-    %ct_total = hal.buffer_view.dim<%ct_k_bv : !hal.buffer_view>[0] : index
-    %ct_k = hal.tensor.import %ct_k_bv : !hal.buffer_view -> tensor<?x8x128xf16>{%ct_total}
-    %ct_v = hal.tensor.import %ct_v_bv : !hal.buffer_view -> tensor<?x8x128xf16>{%ct_total}
-    // Generate with tensor K/V args
+    // Generate
     %gen_start = arith.index_cast %new_pos : index to i64
-    %gen:4 = util.call @generate(%first_tok, %ct_k, %ct_v, %mslen, %max_gen, %eos, %gen_start, %ct_total) : (i64, tensor<?x8x128xf16>, tensor<?x8x128xf16>, index, index, i64, i64, index) -> (tensor<?xi64>, index, tensor<?x8x128xf16>, tensor<?x8x128xf16>)
-    // Convert K/V tensors back to list for persistent storage
-    %gen_k_bv = hal.tensor.export %gen#2 : tensor<?x8x128xf16>{%ct_total} -> !hal.buffer_view
-    %gen_v_bv = hal.tensor.export %gen#3 : tensor<?x8x128xf16>{%ct_total} -> !hal.buffer_view
-    util.list.set %pfill#1[%c0], %gen_k_bv : !hal.buffer_view -> !util.list<?>
-    util.list.set %pfill#1[%c1], %gen_v_bv : !hal.buffer_view -> !util.list<?>
+    %gen:3 = util.call @generate(%first_tok, %pfill#1, %mslen, %max_gen, %eos, %gen_start) : (i64, !util.list<?>, index, index, i64, i64) -> (tensor<?xi64>, index, !util.list<?>)
     // Update persistent state
     %gen_plus1 = arith.addi %gen#1, %c1 : index
     %final_pos = arith.addi %new_pos, %gen_plus1 : index
-    util.global.store %pfill#1, @kv_cache : !util.list<?>
+    util.global.store %gen#2, @kv_cache : !util.list<?>
     util.global.store %final_pos, @current_pos : index
     util.return %gen#0, %gen#1 : tensor<?xi64>, index
   }
