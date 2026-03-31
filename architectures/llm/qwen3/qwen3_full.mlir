@@ -528,25 +528,85 @@ module @llm_inference_qwen {
     } -> tensor<1x1x16x128xf16>
     util.return %18 : tensor<1x1x16x128xf16>
   }
-  // ---- Static attention block for decode ----
+  // ---- Q8_0 fused dequant+GEMV helper ----
+  // Fused Q8_0 dequant + transposed GEMV: Q8[N,K] @ input[K,1] -> output[N,1]
+  // Uses flow.dispatch.region to force single dispatch (no separate dequant pass).
+  // q8_stacked: tensor<28 x bytes_per_layer x i8>, input_t: tensor<K x 1 x f16>
+  // Returns: tensor<N x 1 x f16>
+  util.func private @q8_fused_gemv(
+      %q8_stacked: tensor<28x?xi8>,
+      %layer: i32,
+      %input_t: tensor<?x1xf16>,
+      %N: index, %K: index
+  ) -> tensor<?x1xf16> {
+    %c1 = arith.constant 1 : index
+    %bpl = tensor.dim %q8_stacked, %c1 : tensor<28x?xi8>
+    %result = flow.dispatch.region[] -> (tensor<?x1xf16>{%N}) {
+      %_layer_idx = arith.index_cast %layer : i32 to index
+      %_raw_slice = tensor.extract_slice %q8_stacked[%_layer_idx, 0] [1, %bpl] [1, 1]
+          : tensor<28x?xi8> to tensor<1x?xi8>
+      %_raw = tensor.collapse_shape %_raw_slice [[0, 1]] : tensor<1x?xi8> into tensor<?xi8>
+      %_c1 = arith.constant 1 : index
+      %_c2 = arith.constant 2 : index
+      %_c8_i16 = arith.constant 8 : i16
+      %_c32 = arith.constant 32 : index
+      %_c34 = arith.constant 34 : index
+      %_w_init = tensor.empty(%N, %K) : tensor<?x?xf16>
+      %_w = linalg.generic {
+        indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>],
+        iterator_types = ["parallel", "parallel"]
+      } outs(%_w_init : tensor<?x?xf16>) {
+      ^bb0(%out: f16):
+        %k = linalg.index 0 : index
+        %n = linalg.index 1 : index
+        %kN = arith.muli %k, %K : index
+        %flat_idx = arith.addi %kN, %n : index
+        %blk = arith.divui %flat_idx, %_c32 : index
+        %elem = arith.remui %flat_idx, %_c32 : index
+        %boff = arith.muli %blk, %_c34 : index
+        %s1_off = arith.addi %boff, %_c1 : index
+        %s0 = tensor.extract %_raw[%boff] : tensor<?xi8>
+        %s1 = tensor.extract %_raw[%s1_off] : tensor<?xi8>
+        %s0_i16 = arith.extui %s0 : i8 to i16
+        %s1_i16 = arith.extui %s1 : i8 to i16
+        %s1_sh = arith.shli %s1_i16, %_c8_i16 : i16
+        %scale_i16 = arith.ori %s0_i16, %s1_sh : i16
+        %scale = arith.bitcast %scale_i16 : i16 to f16
+        %v_off = arith.addi %boff, %_c2 : index
+        %e_off = arith.addi %v_off, %elem : index
+        %qval = tensor.extract %_raw[%e_off] : tensor<?xi8>
+        %qval_f16 = arith.sitofp %qval : i8 to f16
+        %dq = arith.mulf %scale, %qval_f16 : f16
+        linalg.yield %dq : f16
+      } -> tensor<?x?xf16>
+      %_cst = arith.constant 0.000000e+00 : f16
+      %_out_init = tensor.empty(%N) : tensor<?x1xf16>
+      %_out_zero = linalg.fill ins(%_cst : f16) outs(%_out_init : tensor<?x1xf16>) -> tensor<?x1xf16>
+      %_result = linalg.matmul ins(%_w, %input_t : tensor<?x?xf16>, tensor<?x1xf16>) outs(%_out_zero : tensor<?x1xf16>) -> tensor<?x1xf16>
+      flow.return %_result : tensor<?x1xf16>
+    }
+    util.return %result : tensor<?x1xf16>
+  }
+  // ---- Static attention block for decode (fused Q8_0 dequant + GEMV) ----
   util.func private @attention_block_decode_static(
       %arg0: tensor<1x1024xf16>,         // normed hidden [1, 1024]
       %arg1: tensor<1x1xi64>,             // positions [1, 1]
       %arg2: tensor<1x?x8x128xf16>,      // cached K [1, ctx_len, 8, 128]
       %arg3: tensor<1x?x8x128xf16>,      // cached V [1, ctx_len, 8, 128]
-      %w_q: tensor<2048x1024xf16>,        // Q weight [N, K] transposed
-      %w_k: tensor<1024x1024xf16>,        // K weight [N, K]
-      %w_v: tensor<1024x1024xf16>,        // V weight [N, K]
-      %w_o: tensor<1024x2048xf16>,        // output weight [N, K]
+      %q8_q: tensor<28x2228224xi8>,       // Q8_0 stacked Q weight
+      %q8_k: tensor<28x1114112xi8>,       // Q8_0 stacked K weight
+      %q8_v: tensor<28x1114112xi8>,       // Q8_0 stacked V weight
+      %q8_o: tensor<28x2228224xi8>,       // Q8_0 stacked O weight
       %w_qn: tensor<128xf16>,             // Q norm weight
-      %w_kn: tensor<128xf16>              // K norm weight
+      %w_kn: tensor<128xf16>,             // K norm weight
+      %layer_i32: i32                     // layer index
   ) -> (tensor<1x1024xf16>, tensor<8x128xf16>, tensor<8x128xf16>) {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %cst = arith.constant 0.000000e+00 : f16
     %eps = arith.constant 9.99999997E-7 : f32
     %dim_0 = tensor.dim %arg2, %c1 : tensor<1x?x8x128xf16>
-    // QKV transposed GEMV: [N, K] @ [K, 1] -> [N, 1] -> [1, N]
+    // QKV fused Q8_0 dequant + transposed GEMV
     // Transpose input once: [1, 1024] -> [1024, 1]
     %x_t_init = tensor.empty() : tensor<1024x1xf16>
     %x_t = linalg.generic {
@@ -555,22 +615,25 @@ module @llm_inference_qwen {
     } ins(%arg0 : tensor<1x1024xf16>) outs(%x_t_init : tensor<1024x1xf16>) {
     ^bb0(%in: f16, %out: f16): linalg.yield %in : f16
     } -> tensor<1024x1xf16>
-    // Q: [2048, 1024] @ [1024, 1] -> [2048, 1]
-    %q_mm_init = tensor.empty() : tensor<2048x1xf16>
-    %q_mm_zero = linalg.fill ins(%cst : f16) outs(%q_mm_init : tensor<2048x1xf16>) -> tensor<2048x1xf16>
-    %q_mm = linalg.matmul ins(%w_q, %x_t : tensor<2048x1024xf16>, tensor<1024x1xf16>) outs(%q_mm_zero : tensor<2048x1xf16>) -> tensor<2048x1xf16>
+    %x_t_dyn = tensor.cast %x_t : tensor<1024x1xf16> to tensor<?x1xf16>
+    %q8_q_dyn = tensor.cast %q8_q : tensor<28x2228224xi8> to tensor<28x?xi8>
+    %q8_k_dyn = tensor.cast %q8_k : tensor<28x1114112xi8> to tensor<28x?xi8>
+    %q8_v_dyn = tensor.cast %q8_v : tensor<28x1114112xi8> to tensor<28x?xi8>
+    %c2048 = arith.constant 2048 : index
+    %c1024 = arith.constant 1024 : index
+    // Q: [2048, 1024] @ [1024, 1] -> [2048, 1] -> [1, 2048]
+    %q_mm_dyn = util.call @q8_fused_gemv(%q8_q_dyn, %layer_i32, %x_t_dyn, %c2048, %c1024) : (tensor<28x?xi8>, i32, tensor<?x1xf16>, index, index) -> tensor<?x1xf16>
+    %q_mm = tensor.cast %q_mm_dyn : tensor<?x1xf16> to tensor<2048x1xf16>
     %q_proj_flat = tensor.collapse_shape %q_mm [[0, 1]] : tensor<2048x1xf16> into tensor<2048xf16>
     %q_proj = tensor.expand_shape %q_proj_flat [[0, 1]] output_shape [1, 2048] : tensor<2048xf16> into tensor<1x2048xf16>
-    // K: [1024, 1024] @ [1024, 1] -> [1024, 1]
-    %k_mm_init = tensor.empty() : tensor<1024x1xf16>
-    %k_mm_zero = linalg.fill ins(%cst : f16) outs(%k_mm_init : tensor<1024x1xf16>) -> tensor<1024x1xf16>
-    %k_mm = linalg.matmul ins(%w_k, %x_t : tensor<1024x1024xf16>, tensor<1024x1xf16>) outs(%k_mm_zero : tensor<1024x1xf16>) -> tensor<1024x1xf16>
+    // K: [1024, 1024] @ [1024, 1] -> [1024, 1] -> [1, 1024]
+    %k_mm_dyn = util.call @q8_fused_gemv(%q8_k_dyn, %layer_i32, %x_t_dyn, %c1024, %c1024) : (tensor<28x?xi8>, i32, tensor<?x1xf16>, index, index) -> tensor<?x1xf16>
+    %k_mm = tensor.cast %k_mm_dyn : tensor<?x1xf16> to tensor<1024x1xf16>
     %k_proj_flat = tensor.collapse_shape %k_mm [[0, 1]] : tensor<1024x1xf16> into tensor<1024xf16>
     %k_proj = tensor.expand_shape %k_proj_flat [[0, 1]] output_shape [1, 1024] : tensor<1024xf16> into tensor<1x1024xf16>
-    // V: [1024, 1024] @ [1024, 1] -> [1024, 1]
-    %v_mm_init = tensor.empty() : tensor<1024x1xf16>
-    %v_mm_zero = linalg.fill ins(%cst : f16) outs(%v_mm_init : tensor<1024x1xf16>) -> tensor<1024x1xf16>
-    %v_mm = linalg.matmul ins(%w_v, %x_t : tensor<1024x1024xf16>, tensor<1024x1xf16>) outs(%v_mm_zero : tensor<1024x1xf16>) -> tensor<1024x1xf16>
+    // V: [1024, 1024] @ [1024, 1] -> [1024, 1] -> [1, 1024]
+    %v_mm_dyn = util.call @q8_fused_gemv(%q8_v_dyn, %layer_i32, %x_t_dyn, %c1024, %c1024) : (tensor<28x?xi8>, i32, tensor<?x1xf16>, index, index) -> tensor<?x1xf16>
+    %v_mm = tensor.cast %v_mm_dyn : tensor<?x1xf16> to tensor<1024x1xf16>
     %v_proj_flat = tensor.collapse_shape %v_mm [[0, 1]] : tensor<1024x1xf16> into tensor<1024xf16>
     %v_proj = tensor.expand_shape %v_proj_flat [[0, 1]] output_shape [1, 1024] : tensor<1024xf16> into tensor<1x1024xf16>
     // Reshape to [1, heads, head_dim] then [batch*heads, head_dim] for QK norm
@@ -661,7 +724,7 @@ module @llm_inference_qwen {
     %attn_out = util.call @attention_gqa_decode_static(%q_roped, %k_concat, %v_concat, %scale) : (tensor<1x1x16x128xf16>, tensor<1x?x8x128xf16>, tensor<1x?x8x128xf16>, f32) -> tensor<1x1x16x128xf16>
     // Reshape: [1, 1, 16, 128] -> [1, 2048]
     %attn_flat = tensor.collapse_shape %attn_out [[0, 1], [2, 3]] : tensor<1x1x16x128xf16> into tensor<1x2048xf16>
-    // Output transposed GEMV: [1024, 2048] @ [2048, 1] -> [1024, 1] -> [1, 1024]
+    // Output fused Q8_0 dequant + transposed GEMV: [1024, 2048] @ [2048, 1] -> [1024, 1] -> [1, 1024]
     %o_xt_init = tensor.empty() : tensor<2048x1xf16>
     %o_xt = linalg.generic {
       indexing_maps = [affine_map<(d0, d1) -> (d1, d0)>, affine_map<(d0, d1) -> (d0, d1)>],
@@ -669,9 +732,12 @@ module @llm_inference_qwen {
     } ins(%attn_flat : tensor<1x2048xf16>) outs(%o_xt_init : tensor<2048x1xf16>) {
     ^bb0(%in: f16, %out: f16): linalg.yield %in : f16
     } -> tensor<2048x1xf16>
-    %o_mm_init = tensor.empty() : tensor<1024x1xf16>
-    %o_mm_zero = linalg.fill ins(%cst : f16) outs(%o_mm_init : tensor<1024x1xf16>) -> tensor<1024x1xf16>
-    %o_mm = linalg.matmul ins(%w_o, %o_xt : tensor<1024x2048xf16>, tensor<2048x1xf16>) outs(%o_mm_zero : tensor<1024x1xf16>) -> tensor<1024x1xf16>
+    %o_xt_dyn = tensor.cast %o_xt : tensor<2048x1xf16> to tensor<?x1xf16>
+    %q8_o_dyn = tensor.cast %q8_o : tensor<28x2228224xi8> to tensor<28x?xi8>
+    %c1024_o = arith.constant 1024 : index
+    %c2048_o = arith.constant 2048 : index
+    %o_mm_dyn = util.call @q8_fused_gemv(%q8_o_dyn, %layer_i32, %o_xt_dyn, %c1024_o, %c2048_o) : (tensor<28x?xi8>, i32, tensor<?x1xf16>, index, index) -> tensor<?x1xf16>
+    %o_mm = tensor.cast %o_mm_dyn : tensor<?x1xf16> to tensor<1024x1xf16>
     %o_proj_flat = tensor.collapse_shape %o_mm [[0, 1]] : tensor<1024x1xf16> into tensor<1024xf16>
     %o_proj = tensor.expand_shape %o_proj_flat [[0, 1]] output_shape [1, 1024] : tensor<1024xf16> into tensor<1x1024xf16>
     // New K for cache: collapse k_roped [1,1,8,128] -> [8, 128]
@@ -702,19 +768,13 @@ module @llm_inference_qwen {
     %qn_w = tensor.cast %qn_w_dyn : tensor<?xf16> to tensor<128xf16>
     %kn_w_dyn = util.call @model_params.attn_k_norm_weight(%layer_i32) : (i32) -> tensor<?xf16>
     %kn_w = tensor.cast %kn_w_dyn : tensor<?xf16> to tensor<128xf16>
-    // Load matmul weights in GGUF native [N, K] layout for transposed GEMV
-    %q_w_dyn = util.call @model_params.q8_attn_q_weight(%layer_i32) : (i32) -> tensor<?x?xf16>
-    %q_w = tensor.cast %q_w_dyn : tensor<?x?xf16> to tensor<2048x1024xf16>
-    %k_w_dyn = util.call @model_params.q8_attn_k_weight(%layer_i32) : (i32) -> tensor<?x?xf16>
-    %k_w = tensor.cast %k_w_dyn : tensor<?x?xf16> to tensor<1024x1024xf16>
-    %v_w_dyn = util.call @model_params.q8_attn_v_weight(%layer_i32) : (i32) -> tensor<?x?xf16>
-    %v_w = tensor.cast %v_w_dyn : tensor<?x?xf16> to tensor<1024x1024xf16>
-    %o_w_dyn = util.call @model_params.q8_attn_output_weight(%layer_i32) : (i32) -> tensor<?x?xf16>
-    %o_w = tensor.cast %o_w_dyn : tensor<?x?xf16> to tensor<1024x2048xf16>
-    %gu_w_dyn = util.call @model_params.q8_ffn_gate_up_weight(%layer_i32) : (i32) -> tensor<?x?xf16>
-    %gu_w = tensor.cast %gu_w_dyn : tensor<?x?xf16> to tensor<6144x1024xf16>
-    %down_w_dyn = util.call @model_params.q8_ffn_down_weight(%layer_i32) : (i32) -> tensor<?x?xf16>
-    %down_w = tensor.cast %down_w_dyn : tensor<?x?xf16> to tensor<1024x3072xf16>
+    // Load raw Q8_0 stacked tensors (fused with GEMV below via flow.dispatch.region)
+    %q8_q = flow.tensor.constant #flow.parameter.named<"model"::"stacked.q8.attn_q.weight"> : tensor<28x2228224xi8>
+    %q8_k = flow.tensor.constant #flow.parameter.named<"model"::"stacked.q8.attn_k.weight"> : tensor<28x1114112xi8>
+    %q8_v = flow.tensor.constant #flow.parameter.named<"model"::"stacked.q8.attn_v.weight"> : tensor<28x1114112xi8>
+    %q8_o = flow.tensor.constant #flow.parameter.named<"model"::"stacked.q8.attn_output.weight"> : tensor<28x2228224xi8>
+    %q8_gu = flow.tensor.constant #flow.parameter.named<"model"::"stacked.q8.ffn_gate_up.weight"> : tensor<28x6684672xi8>
+    %q8_dn = flow.tensor.constant #flow.parameter.named<"model"::"stacked.q8.ffn_down.weight"> : tensor<28x3342336xi8>
     // Attention norm
     %normed = util.call @rms_norm_1x1024(%hidden, %attn_norm, %eps) : (tensor<1x1024xf16>, tensor<1024xf16>, f32) -> tensor<1x1024xf16>
     // Cache read — direct tensor slice, no import/export
@@ -728,7 +788,7 @@ module @llm_inference_qwen {
     // Positions: [1] -> [1, 1] for attention block
     %pos_2d = tensor.expand_shape %positions [[0, 1]] output_shape [1, 1] : tensor<1xi64> into tensor<1x1xi64>
     // Attention block
-    %attn:3 = util.call @attention_block_decode_static(%normed, %pos_2d, %cached_k, %cached_v, %q_w, %k_w, %v_w, %o_w, %qn_w, %kn_w) : (tensor<1x1024xf16>, tensor<1x1xi64>, tensor<1x?x8x128xf16>, tensor<1x?x8x128xf16>, tensor<2048x1024xf16>, tensor<1024x1024xf16>, tensor<1024x1024xf16>, tensor<1024x2048xf16>, tensor<128xf16>, tensor<128xf16>) -> (tensor<1x1024xf16>, tensor<8x128xf16>, tensor<8x128xf16>)
+    %attn:3 = util.call @attention_block_decode_static(%normed, %pos_2d, %cached_k, %cached_v, %q8_q, %q8_k, %q8_v, %q8_o, %qn_w, %kn_w, %layer_i32) : (tensor<1x1024xf16>, tensor<1x1xi64>, tensor<1x?x8x128xf16>, tensor<1x?x8x128xf16>, tensor<28x2228224xi8>, tensor<28x1114112xi8>, tensor<28x1114112xi8>, tensor<28x2228224xi8>, tensor<128xf16>, tensor<128xf16>, i32) -> (tensor<1x1024xf16>, tensor<8x128xf16>, tensor<8x128xf16>)
     // Cache write — direct tensor insert, no import/export
     %pos_i64 = tensor.extract %positions[%c0] : tensor<1xi64>
     %pos_idx = arith.index_cast %pos_i64 : i64 to index
@@ -745,7 +805,7 @@ module @llm_inference_qwen {
     } -> tensor<1x1024xf16>
     // FFN norm
     %ffn_normed = util.call @rms_norm_1x1024(%res1, %ffn_norm, %eps) : (tensor<1x1024xf16>, tensor<1024xf16>, f32) -> tensor<1x1024xf16>
-    // Gate+Up transposed GEMV: [6144, 1024] @ [1024, 1] -> [6144, 1] -> [1, 6144]
+    // Gate+Up fused Q8_0 dequant + transposed GEMV: [6144, 1024] @ [1024, 1]
     %gu_xt_init = tensor.empty() : tensor<1024x1xf16>
     %gu_xt = linalg.generic {
       indexing_maps = [affine_map<(d0, d1) -> (d1, d0)>, affine_map<(d0, d1) -> (d0, d1)>],
@@ -753,9 +813,12 @@ module @llm_inference_qwen {
     } ins(%ffn_normed : tensor<1x1024xf16>) outs(%gu_xt_init : tensor<1024x1xf16>) {
     ^bb0(%in: f16, %out: f16): linalg.yield %in : f16
     } -> tensor<1024x1xf16>
-    %gu_out_init = tensor.empty() : tensor<6144x1xf16>
-    %gu_out_zero = linalg.fill ins(%cst : f16) outs(%gu_out_init : tensor<6144x1xf16>) -> tensor<6144x1xf16>
-    %gu_out = linalg.matmul ins(%gu_w, %gu_xt : tensor<6144x1024xf16>, tensor<1024x1xf16>) outs(%gu_out_zero : tensor<6144x1xf16>) -> tensor<6144x1xf16>
+    %gu_xt_dyn = tensor.cast %gu_xt : tensor<1024x1xf16> to tensor<?x1xf16>
+    %q8_gu_dyn = tensor.cast %q8_gu : tensor<28x6684672xi8> to tensor<28x?xi8>
+    %c6144_gu = arith.constant 6144 : index
+    %c1024_gu = arith.constant 1024 : index
+    %gu_out_dyn = util.call @q8_fused_gemv(%q8_gu_dyn, %layer_i32, %gu_xt_dyn, %c6144_gu, %c1024_gu) : (tensor<28x?xi8>, i32, tensor<?x1xf16>, index, index) -> tensor<?x1xf16>
+    %gu_out = tensor.cast %gu_out_dyn : tensor<?x1xf16> to tensor<6144x1xf16>
     %gu_flat = tensor.collapse_shape %gu_out [[0, 1]] : tensor<6144x1xf16> into tensor<6144xf16>
     %gate_up = tensor.expand_shape %gu_flat [[0, 1]] output_shape [1, 6144] : tensor<6144xf16> into tensor<1x6144xf16>
     // Split: gate [1, 3072] and up [1, 3072]
@@ -782,9 +845,12 @@ module @llm_inference_qwen {
     } ins(%swiglu : tensor<1x3072xf16>) outs(%down_xt_init : tensor<3072x1xf16>) {
     ^bb0(%in: f16, %out: f16): linalg.yield %in : f16
     } -> tensor<3072x1xf16>
-    %down_out_init = tensor.empty() : tensor<1024x1xf16>
-    %down_out_zero = linalg.fill ins(%cst : f16) outs(%down_out_init : tensor<1024x1xf16>) -> tensor<1024x1xf16>
-    %down_out = linalg.matmul ins(%down_w, %down_xt : tensor<1024x3072xf16>, tensor<3072x1xf16>) outs(%down_out_zero : tensor<1024x1xf16>) -> tensor<1024x1xf16>
+    %dn_xt_dyn = tensor.cast %down_xt : tensor<3072x1xf16> to tensor<?x1xf16>
+    %q8_dn_dyn = tensor.cast %q8_dn : tensor<28x3342336xi8> to tensor<28x?xi8>
+    %c1024_dn = arith.constant 1024 : index
+    %c3072_dn = arith.constant 3072 : index
+    %dn_out_dyn = util.call @q8_fused_gemv(%q8_dn_dyn, %layer_i32, %dn_xt_dyn, %c1024_dn, %c3072_dn) : (tensor<28x?xi8>, i32, tensor<?x1xf16>, index, index) -> tensor<?x1xf16>
+    %down_out = tensor.cast %dn_out_dyn : tensor<?x1xf16> to tensor<1024x1xf16>
     %down_flat = tensor.collapse_shape %down_out [[0, 1]] : tensor<1024x1xf16> into tensor<1024xf16>
     %ffn_out = tensor.expand_shape %down_flat [[0, 1]] output_shape [1, 1024] : tensor<1024xf16> into tensor<1x1024xf16>
     // Residual 2
