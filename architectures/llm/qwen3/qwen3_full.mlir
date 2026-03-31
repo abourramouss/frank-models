@@ -1409,7 +1409,7 @@ module @llm_inference_qwen {
     %output_norm = tensor.cast %output_norm_dyn : tensor<?xf16> to tensor<1024xf16>
     %output_wt_gen = util.call @model_params.output_weight_T() : () -> tensor<151936x1024xf16>
     // Batched generation: inner scf.for of 16 tokens (no sync), outer scf.while checks EOS.
-    %c_batch = arith.constant 1 : index
+    %c_batch = arith.constant 4 : index
     %17 = tensor.empty(%arg3) : tensor<?xi64>
     %18 = linalg.fill ins(%c0_i64 : i64) outs(%17 : tensor<?xi64>) -> tensor<?xi64>
     %start_ctx = arith.index_cast %arg5 : i64 to index

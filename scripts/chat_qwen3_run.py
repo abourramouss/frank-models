@@ -55,5 +55,11 @@ while True:
     dt = time.time() - t0
     out = DeviceArray(device, r.get_as_object(0, HalBufferView), implicit_host_transfer=True).to_host()
     n = int(r.get_variant(1))
-    print(tokenizer.decode(out[:n].tolist()))
+    # Trim at EOS (batch decode may overshoot past end-of-turn)
+    tokens_out = out[:n].tolist()
+    eos_id = 151645
+    if eos_id in tokens_out:
+        tokens_out = tokens_out[:tokens_out.index(eos_id)]
+        n = len(tokens_out)
+    print(tokenizer.decode(tokens_out))
     print(f"[{n} tok, {dt:.1f}s, {n/dt:.1f} tok/s]")
