@@ -56,45 +56,40 @@ hal.executable public @decode_dispatch_18 {
         %layer_i64 = arith.ori %pc0_64, %pc1_sh : i64
         %layer_idx = arith.index_castui %layer_i64 : i64 to index
 
-        // Flat buffer bindings (raw pointers, like CUDA kernel)
-        %q8_flat = hal.interface.binding.subspan layout(<constants = 2, bindings = [
+        // Flat buffer bindings with #gpu.address_space<global> to skip cvta.to.global
+        %c64_bytes = arith.constant 64 : index
+        %c6144_bytes = arith.constant 6144 : index
+        %q8 = hal.interface.binding.subspan layout(<constants = 2, bindings = [
           #hal.pipeline.binding<storage_buffer, ReadOnly>,
           #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">,
           #hal.pipeline.binding<storage_buffer, Indirect>
-        ], flags = Indirect>) binding(0) alignment(64) offset(%c0) flags(ReadOnly) : memref<i8>
-        %b1_flat = hal.interface.binding.subspan layout(<constants = 2, bindings = [
+        ], flags = Indirect>) binding(0) alignment(64) offset(%c0) flags(ReadOnly) : memref<200000000xi8, #gpu.address_space<global>>
+        %input = hal.interface.binding.subspan layout(<constants = 2, bindings = [
           #hal.pipeline.binding<storage_buffer, ReadOnly>,
           #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">,
           #hal.pipeline.binding<storage_buffer, Indirect>
-        ], flags = Indirect>) binding(1) alignment(64) offset(%c0) flags("ReadOnly|Indirect") : memref<f16>
-        %b2_flat = hal.interface.binding.subspan layout(<constants = 2, bindings = [
+        ], flags = Indirect>) binding(1) alignment(64) offset(%c64_bytes) flags("ReadOnly|Indirect") : memref<1024xf16, strided<[1], offset: ?>, #gpu.address_space<global>>
+        %output = hal.interface.binding.subspan layout(<constants = 2, bindings = [
           #hal.pipeline.binding<storage_buffer, ReadOnly>,
           #hal.pipeline.binding<storage_buffer, "ReadOnly|Indirect">,
           #hal.pipeline.binding<storage_buffer, Indirect>
-        ], flags = Indirect>) binding(2) alignment(64) offset(%c0) flags(Indirect) : memref<f16>
-
-        // Reinterpret as large flat arrays
-        %q8 = memref.reinterpret_cast %q8_flat to offset: [0], sizes: [200000000], strides: [1] : memref<i8> to memref<200000000xi8>
-        %c32_offset = arith.constant 32 : index  // 64 bytes / 2 bytes per f16 = 32 elements
-        %input = memref.reinterpret_cast %b1_flat to offset: [%c32_offset], sizes: [1024], strides: [1] : memref<f16> to memref<1024xf16, strided<[1], offset: ?>>
-        %c3072_offset = arith.constant 3072 : index  // 6144 bytes / 2 bytes per f16 = 3072 elements
-        %output = memref.reinterpret_cast %b2_flat to offset: [%c3072_offset], sizes: [6144], strides: [1] : memref<f16> to memref<6144xf16, strided<[1], offset: ?>>
+        ], flags = Indirect>) binding(2) alignment(64) offset(%c6144_bytes) flags(Indirect) : memref<6144xf16, strided<[1], offset: ?>, #gpu.address_space<global>>
 
         %tid = gpu.thread_id x upper_bound 256
         %bid = gpu.block_id x upper_bound 768
 
         // Shared memory — unrolled load (4 loads per thread for K=1024)
         %smem = memref.alloc() : memref<1024xf16, #gpu.address_space<workgroup>>
-        %v0 = memref.load %input[%tid] : memref<1024xf16, strided<[1], offset: ?>>
+        %v0 = memref.load %input[%tid] : memref<1024xf16, strided<[1], offset: ?>, #gpu.address_space<global>>
         memref.store %v0, %smem[%tid] : memref<1024xf16, #gpu.address_space<workgroup>>
         %i1 = arith.addi %tid, %c256 : index
-        %v1 = memref.load %input[%i1] : memref<1024xf16, strided<[1], offset: ?>>
+        %v1 = memref.load %input[%i1] : memref<1024xf16, strided<[1], offset: ?>, #gpu.address_space<global>>
         memref.store %v1, %smem[%i1] : memref<1024xf16, #gpu.address_space<workgroup>>
         %i2 = arith.addi %tid, %c512 : index
-        %v2 = memref.load %input[%i2] : memref<1024xf16, strided<[1], offset: ?>>
+        %v2 = memref.load %input[%i2] : memref<1024xf16, strided<[1], offset: ?>, #gpu.address_space<global>>
         memref.store %v2, %smem[%i2] : memref<1024xf16, #gpu.address_space<workgroup>>
         %i3 = arith.addi %tid, %c768 : index
-        %v3 = memref.load %input[%i3] : memref<1024xf16, strided<[1], offset: ?>>
+        %v3 = memref.load %input[%i3] : memref<1024xf16, strided<[1], offset: ?>, #gpu.address_space<global>>
         memref.store %v3, %smem[%i3] : memref<1024xf16, #gpu.address_space<workgroup>>
         gpu.barrier
 
@@ -114,9 +109,9 @@ hal.executable public @decode_dispatch_18 {
           %byte_off = arith.addi %off1, %blk_off : index
 
           // Load scale
-          %s0 = memref.load %q8[%byte_off] : memref<200000000xi8>
+          %s0 = memref.load %q8[%byte_off] : memref<200000000xi8, #gpu.address_space<global>>
           %s1_idx = arith.addi %byte_off, %c1 : index
-          %s1 = memref.load %q8[%s1_idx] : memref<200000000xi8>
+          %s1 = memref.load %q8[%s1_idx] : memref<200000000xi8, #gpu.address_space<global>>
           %s0_16 = arith.extui %s0 : i8 to i16
           %s1_16 = arith.extui %s1 : i8 to i16
           %s1_sh = arith.shli %s1_16, %c8_i16 : i16
@@ -129,7 +124,7 @@ hal.executable public @decode_dispatch_18 {
           %k_base = arith.muli %lane, %c32 : index
           %dot = scf.for %j = %c0 to %c32 step %c1 iter_args(%acc = %cst_zero) -> (f32) {
             %j_off = arith.addi %val_base, %j : index
-            %qv = memref.load %q8[%j_off] : memref<200000000xi8>
+            %qv = memref.load %q8[%j_off] : memref<200000000xi8, #gpu.address_space<global>>
             %qv_f = arith.sitofp %qv : i8 to f32
             %k = arith.addi %k_base, %j : index
             %iv = memref.load %smem[%k] : memref<1024xf16, #gpu.address_space<workgroup>>
@@ -155,7 +150,7 @@ hal.executable public @decode_dispatch_18 {
           %is_lane0 = arith.cmpi eq, %lane, %c0 : index
           scf.if %is_lane0 {
             %out_f16 = arith.truncf %r5 : f32 to f16
-            memref.store %out_f16, %output[%row] : memref<6144xf16, strided<[1], offset: ?>>
+            memref.store %out_f16, %output[%row] : memref<6144xf16, strided<[1], offset: ?>, #gpu.address_space<global>>
           }
         }
         return
